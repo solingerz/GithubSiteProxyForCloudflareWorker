@@ -28,8 +28,9 @@ const domain_mappings = Object.fromEntries(
 );
 
 
-// 需要重定向的路径
-const redirect_paths = ['/', '/login', '/signup', '/copilot', '/search/custom_scopes', '/session'];
+// 需要重定向的路径（屏蔽海外后可以不填写）
+//const redirect_paths = ['/', '/login', '/signup', '/copilot', '/search/custom_scopes', '/session'];
+const redirect_paths = [];
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
