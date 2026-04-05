@@ -1,128 +1,139 @@
-# GitHub代理服务
+# GitHub Proxy (Cloudflare Workers)
 
-## 项目概述
+## 项目简介
 
-这是一个基于Cloudflare Workers的GitHub代理服务，允许通过替代域名访问GitHub资源，解决某些网络环境下GitHub访问受限的问题。代理服务通过域名映射和资源转发，提供无缝的GitHub浏览体验。
+这是一个运行在 Cloudflare Workers 上的 GitHub 公共访问代理。项目使用 `gh.<你的域名>` 作为入口域名，并把真实上游映射到稳定的脱敏代理子域 `p<hash>-gh.<你的域名>`，避免直接在代理域名中暴露 `github`、`githubusercontent` 等关键词。
 
-## 特性
+当前实现以“匿名公开访问”为前提，重点覆盖 GitHub Web 页面、公开 API、Raw 文件、Release/下载资源、Gist、Docs、Status 以及部分公开 NPM 资源。入口域名负责展示首页并承接直达请求，真正的代理流量由哈希子域处理。
 
-- **子域名匹配系统**：使用 `gh.` 前缀作为GitHub主站的代理入口，支持任何域名后缀
-- **完整的资源映射**：支持GitHub相关的所有主要域名，包括API、静态资源、用户内容等
-- **内容替换**：自动替换响应中的所有域名引用，确保链接正常工作
-- **路径修复**：解决嵌套URL路径问题，特别针对仓库提交信息等特殊路径
-- **安全重定向**：对敏感路径（如登录页面）进行安全重定向
-- **HTTPS强制**：自动将HTTP请求升级为HTTPS
+## 当前实现的能力
 
-## 支持的域名映射
+- 稳定哈希子域映射：同一个上游域名始终映射到同一个 `p<hash>-gh` 子域，后续新增白名单时不会影响已有映射。
+- 入口页与代理页分离：`gh.<你的域名>` 提供终端风格首页，非首页请求会自动跳转到对应代理子域。
+- 自动改写白名单域名：会改写 HTML、CSS、JavaScript、XML、JSON 中的域名引用，保证页面链接、静态资源和 API 请求继续走代理。
+- 跨域名自动纠正：如果路径里嵌入了 `https://github.com/...`、`https://raw.githubusercontent.com/...` 之类的目标地址，会自动跳转到正确的代理子域。
+- 特殊路径修复：内置 `latest-commit`、`tree-commit-info` 等嵌套 URL 修复逻辑。
+- 基础 CORS 支持：处理预检请求，并把跨域所需响应头补齐。
+- 安全清洗：会剥离 `Authorization`、真实 IP、转发链等敏感请求头，只保留匿名访问所需的少量 Cookie。
+- 超时与缓存控制：上游请求超时为 15 秒，并按内容类型设置不同缓存策略。
+- 可选地域回源：支持按国家/地区直接回源到真实站点，但默认关闭。
 
-服务支持以下GitHub相关域名的代理访问：
+## 默认白名单域名
 
-- github.com → gh.[您的域名]
-- avatars.githubusercontent.com → avatars-githubusercontent-com-gh.[您的域名]
-- github.githubassets.com → github-githubassets-com-gh.[您的域名]
-- api.github.com → api-github-com-gh.[您的域名]
-- raw.githubusercontent.com → raw-githubusercontent-com-gh.[您的域名]
-- 以及更多GitHub相关服务域名
+当前代码里的 `domain_whitelist` 包含以下域名：
 
-## 部署指南
+- GitHub 主站与 API：`github.com`、`api.github.com`、`gist.github.com`
+- 静态资源：`github.githubassets.com`、`assets-cdn.github.com`、`cdn.jsdelivr.net`、`github.global.ssl.fastly.net`
+- 下载相关：`codeload.github.com`、`git-lfs.github.com`
+- `githubusercontent` 相关：`githubusercontent.com`、`raw.githubusercontent.com`、`gist.githubusercontent.com`、`avatars.githubusercontent.com`、`camo.githubusercontent.com`、`objects.githubusercontent.com`、`media.githubusercontent.com`、`cloud.githubusercontent.com`、`user-images.githubusercontent.com`、`favicons.githubusercontent.com`、`repository-images.githubusercontent.com`、`render.githubusercontent.com`
+- GitHub 子站：`docs.github.com`、`education.github.com`、`securitylab.github.com`、`desktop.github.com`、`pages.github.com`
+- 状态与公开 NPM 服务：`www.githubstatus.com`、`npmjs.com`、`api.npms.io`
 
-### 前提条件
+如果上游页面重定向到了未列出的域名，Worker 会记录未命中的重定向目标，此时需要把对应域名补进白名单后重新部署。
 
-- Cloudflare账户
-- 已配置的域名（托管在Cloudflare上）
-- 基本的DNS配置知识
+## 域名映射示例
 
-### 部署步骤
+假设：
 
-1. **登录Cloudflare控制台**
-   - 进入Workers部分
-
-2. **创建新的Worker**
-   - 点击"创建Worker"
-   - 将提供的代码粘贴到代码编辑器中
-   - 给Worker命名并保存
-
-3. **配置对应其他资源的域名映射**
-   - 更改域名映射配置，将所有相关域名指向您的Worker路由
-   - 将 `github.com` 指向您的Worker路由域名 `gh.您的域名`
-   - 将 `avatars.githubusercontent.com` 等其他资源指向您的Worker路由域名 `avatars-githubusercontent-com-gh.您的域名`
-
-4. **配置DNS记录**
-   - 为您的泛域名添加任何命中CDN的记录
-   - 例如 `*.您的域名` A记录指向任何IP并开启代理
-
-5. **配置Worker路由**
-   - 添加路由 `*-gh.您的域名/*` 和 `gh.您的域名/*` 指向您的Worker
-
-### 配置自定义域名
-
-如果您想使用不同的域名前缀（仅github.com主站），请修改代码中的`domain_mappings`对象，将默认的`gh.`等前缀替换为您喜欢的前缀。
-
-## 使用方法
-
-部署成功后，只需将原始GitHub URL中的域名部分替换为对应的代理域名：
-
-```
-# 原始URL
-https://github.com/用户名/仓库名
-
-# 代理URL
-https://gh.您的域名/用户名/仓库名
+```js
+const PROXY_DOMAIN_SUFFIX = 'example.com';
 ```
 
-其他GitHub资源的访问方式类似，系统会自动处理域名映射和内容替换。
+那么当前实现生成的部分映射如下：
 
-## 技术说明
+- 入口主页：`gh.example.com`
+- `github.com` -> `p1mmyth9b36hjt-gh.example.com`
+- `raw.githubusercontent.com` -> `pyuecc1dhdh1t-gh.example.com`
+- `api.github.com` -> `p1hqex1sp2ddwz-gh.example.com`
+- `gist.github.com` -> `pgm26gib2xfx8-gh.example.com`
 
-### 工作原理
+这些哈希映射由域名本身确定性计算得出，不依赖数组顺序。
 
-1. 接收对代理域名的请求
-2. 识别目标GitHub域名
-3. 转发请求到GitHub服务器
-4. 接收GitHub的响应
-5. 替换响应内容中的域名引用
-6. 返回修改后的响应给用户
+## 关键配置
 
-### 特殊路径处理
+主要配置都在 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 顶部：
 
-代码包含专门的逻辑来处理特殊路径，特别是用于仓库提交信息的路径，解决了嵌套URL问题：
-
+```js
+const PROXY_DOMAIN_SUFFIX = 'example.com';
+const ENABLE_GEO_REDIRECT = false;
+const ALLOWED_COUNTRIES = ['CN'];
+const ENABLE_STRICT_DEFENSE = true;
 ```
-/用户名/仓库名/latest-commit/分支名/https://gh.域名/...
+
+- `PROXY_DOMAIN_SUFFIX`：必填，你自己的主域名。
+- `ENABLE_GEO_REDIRECT`：是否把指定地区以外的访问直接跳回真实上游域名，默认 `false`。
+- `ALLOWED_COUNTRIES`：仅在开启地域回源时生效，默认只允许 `CN` 继续走代理。
+- `ENABLE_STRICT_DEFENSE`：是否额外拦截常见后台、探测、扫描类路径，默认开启。
+
+另外还有两个与行为强相关的常量：
+
+- `MAX_REWRITE_SIZE = 5 * 1024 * 1024`：超过 5MB 的文本响应不会做正文改写，直接透传。
+- `UPSTREAM_TIMEOUT_MS = 15000`：上游请求超时时间为 15 秒。
+
+## 部署
+
+### 方式一：Cloudflare Dashboard
+
+1. 在 Cloudflare 控制台创建一个 Worker。
+2. 将 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 的内容粘贴到 Worker 编辑器中。
+3. 修改 `PROXY_DOMAIN_SUFFIX` 等配置。
+4. 保存并部署。
+
+### 方式二：Wrangler
+
+仓库已经包含 [wrangler.toml](/workspaces/GithubSiteProxyForCloudflareWorker/wrangler.toml)，也可以直接用 Wrangler 部署：
+
+```bash
+wrangler deploy
 ```
 
-这类路径会被正确截断并转发到GitHub。
+部署前同样需要先修改 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 里的域名配置。
 
-## 安全考虑
+### DNS 与 Routes
 
-- 代理服务不存储或处理用户凭据
-- 敏感路径（如登录页面）会被重定向到其他网站
-- 所有流量都通过HTTPS加密
+1. 在 Cloudflare DNS 中添加一条开启代理的小黄云 `A` 记录：
 
-## 限制
+| 类型 | 名称 | 地址 | 代理 |
+| :--- | :--- | :--- | :--- |
+| A | `*` | `192.0.2.1` | 开启 |
 
-- 不支持GitHub的登录和注册功能
-- 某些高级GitHub功能可能不完全兼容
-- 不能代替GitHub CLI或Git等工具的直接连接
+`192.0.2.1` 只是占位地址，真实请求仍由 Cloudflare 接管。
 
-## 故障排除
+2. 在 Worker Routes 中添加两条规则：
 
-如果遇到问题：
+- `gh.example.com/*`
+- `*-gh.example.com/*`
 
-1. 确认DNS记录配置正确
-2. 检查Worker是否正常运行
-3. 尝试清除浏览器缓存
-4. 检查请求和响应日志以获取详细错误信息
+这里的 `example.com` 需要替换成你自己的域名。当前设计只依赖单级子域，兼容 Cloudflare 免费版证书。
 
-## 贡献指南
+## 使用方式
 
-欢迎提交Pull Request或Issue来改进此项目。特别欢迎以下方面的贡献：
+部署完成后可通过以下方式访问：
 
-- 增加对更多GitHub相关域名的支持
-- 改进内容替换逻辑
-- 增强错误处理机制
-- 添加性能优化
+- 首页：`https://gh.<你的域名>`
+- 直达仓库：`https://gh.<你的域名>/vuejs/core`
+- 首页输入框支持两种输入：`owner/repo` 或 `https://github.com/owner/repo`
+
+入口域名收到非首页请求后，会自动 302 到对应的哈希代理子域。后续页面里涉及的 Raw、头像、静态资源、Docs、Gist、NPM 等白名单域名，也会自动改写到对应代理域名。
+
+## 安全策略与限制
+
+- 仅支持匿名公开访问，不支持登录、注册、账号设置、通知、组织管理、支付、Copilot、Marketplace 等需要身份态或高风险的页面。
+- 会拦截常见敏感查询参数：`return_to`、`redirect_to`、`next`、`continue`、`destination`。
+- 会移除 URL 中的 `access_token`、`token` 等参数。
+- 会移除 `authorization`、`x-forwarded-*`、`cf-connecting-ip`、`x-real-ip` 等敏感请求头。
+- 只允许透传 `_gh_sess` 和 `_octo` 两个匿名访问相关 Cookie，并限制单个值长度。
+- 对于超过 5MB 的文本响应，不会做正文替换，因此极大文本页面可能仍保留原始域名引用。
+- 项目主要面向浏览器访问与公开资源下载，不能替代 `git clone`、SSH、GitHub CLI 登录态操作。
+
+## 故障排查
+
+1. 访问直接 404：先检查 Worker Routes 是否同时配置了 `gh.<域名>/*` 和 `*-gh.<域名>/*`。
+2. 出现证书问题：确认使用的是单级子域，例如 `p1mmyth9b36hjt-gh.example.com`，不要再套一层子域。
+3. 页面资源没有走代理：如果是新的上游域名，需要把它加入 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 里的 `domain_whitelist`。
+4. 某些文本内容没有被改写：先确认响应是否超过 `5MB`，超过限制会直接透传。
+5. 想按地区自动回源：把 `ENABLE_GEO_REDIRECT` 改为 `true`，并按需调整 `ALLOWED_COUNTRIES` 后重新部署。
 
 ## 免责声明
 
-此代理服务仅用于教育和研究目的。使用者应确保遵守GitHub的服务条款和当地法律法规。
+此项目仅用于教育、研究和改善公开资源访问体验。使用者应自行评估合规性，并遵守当地法律法规与 GitHub 服务条款。
