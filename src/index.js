@@ -32,6 +32,9 @@ const STRIP_RESP_HEADERS = [
 
 const MAX_REWRITE_SIZE = 5 * 1024 * 1024; // 5MB
 const UPSTREAM_TIMEOUT_MS = 15000;
+const GITHUB_TOKEN = ''; // 可选：填入 Fine-grained personal access tokens，未认证 60 次/小时 → 认证后 5000 次/小时
+const ENABLE_CACHE = true; // 启用 Cache API 缓存层，减少上游请求
+const CACHE_TTL = 300; // 缓存默认 TTL（秒），仅在上游无明确 Cache-Control 时使用
 
 const ALLOWED_COOKIES = new Set(['_gh_sess', '_octo']);
 const MAX_COOKIE_VALUE_LENGTH = 512;
@@ -294,7 +297,7 @@ const extraDefensePatterns = [
 // ===================== CORS =====================
 function corsHeaders(origin) {
   const h = {
-    'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
+    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
     'access-control-allow-headers': '*',
     'access-control-expose-headers': '*',
     'access-control-max-age': '86400',
@@ -1312,6 +1315,14 @@ async function handleProxyRequest(request, url, origin, effectiveHost) {
     });
   }
 
+  // 只读代理：仅允许 GET / HEAD，拒绝所有写操作。
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    return new Response('Method Not Allowed', {
+      status: 405,
+      headers: { ...Object.fromEntries(applyCorsHeaders(new Headers(), origin)), 'Allow': 'GET, HEAD, OPTIONS' },
+    });
+  }
+
   const originalPath = url.pathname;
   const originalSearch = url.search || '';
   const extracted = extractTargetFromPath(originalPath);
@@ -1401,12 +1412,33 @@ async function handleProxyRequest(request, url, origin, effectiveHost) {
     headers.delete(h);
   }
 
+  // 如果配置了 GitHub Token，注入认证头以提升速率限制配额。
+  if (GITHUB_TOKEN) {
+    headers.set('Authorization', `token ${GITHUB_TOKEN}`);
+  }
+
   // 仅转发匿名访问所需的 Cookie。
   const safeCookie = sanitizeCookies(headers.get('cookie') || '');
   if (safeCookie) {
     headers.set('cookie', safeCookie);
   } else {
     headers.delete('cookie');
+  }
+
+  // ── Cache API 缓存层 ──
+  const isCacheable = ENABLE_CACHE && (request.method === 'GET' || request.method === 'HEAD');
+  const cache = isCacheable ? caches.default : null;
+  // 用上游 URL 做缓存键，确保不同代理子域共享同一缓存条目。
+  const cacheKey = isCacheable ? new Request(upstream.href, { method: 'GET' }) : null;
+
+  if (cache && cacheKey) {
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      // 命中缓存：改写 CORS 头后直接返回。
+      const cachedHeaders = new Headers(cached.headers);
+      applyCorsHeaders(cachedHeaders, origin);
+      return new Response(cached.body, { status: cached.status, headers: cachedHeaders });
+    }
   }
 
   // 为上游请求设置超时控制。
@@ -1417,7 +1449,6 @@ async function handleProxyRequest(request, url, origin, effectiveHost) {
     const resp = await fetch(upstream.href, {
       method: request.method,
       headers,
-      body: (request.method !== 'GET' && request.method !== 'HEAD') ? request.body : undefined,
       redirect: 'manual',
       signal: controller.signal,
     });
@@ -1471,7 +1502,28 @@ async function handleProxyRequest(request, url, origin, effectiveHost) {
     // 直接消费上游响应体并按需改写。
     const body = await modifyResponse(resp);
 
-    return new Response(body, { status: resp.status, headers: respHeaders });
+    const finalResponse = new Response(body, { status: resp.status, headers: respHeaders });
+
+    // 仅缓存 200 且上游未明确禁止缓存的 GET 响应。
+    if (cache && cacheKey && resp.status === 200) {
+      const ccLower = (respHeaders.get('cache-control') || '').toLowerCase();
+      if (!ccLower.includes('no-store') && !ccLower.includes('private')) {
+        const toCache = finalResponse.clone();
+        // 如果上游未提供明确的 max-age，用默认 TTL 确保缓存会过期。
+        if (!ccLower.includes('max-age') && !ccLower.includes('s-maxage')) {
+          const cacheHeaders = new Headers(toCache.headers);
+          cacheHeaders.set('cache-control', `public, s-maxage=${CACHE_TTL}`);
+          const cacheResp = new Response(toCache.body, { status: toCache.status, headers: cacheHeaders });
+          // waitUntil 不阻塞响应返回。
+          // cache.put 在 Worker 全局上下文中自动排队，无需 ctx.waitUntil。
+          cache.put(cacheKey, cacheResp).catch(() => {});
+        } else {
+          cache.put(cacheKey, toCache).catch(() => {});
+        }
+      }
+    }
+
+    return finalResponse;
   } catch (err) {
     clearTimeout(timeoutId);
 
