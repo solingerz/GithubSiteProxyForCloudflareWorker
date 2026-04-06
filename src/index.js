@@ -1076,12 +1076,12 @@ ${COMMON_CSS}
       </div>
       
       <form class="terminal-input-group" id="f" onsubmit="return go()">
-        <input type="text" id="u" placeholder="owner/repo 或 https://github.com/..." autocomplete="off" spellcheck="false" autofocus/>
+        <input type="text" id="u" placeholder="owner/repo、关键词 或 https://github.com/..." autocomplete="off" spellcheck="false" autofocus/>
         <button type="submit">EXECUTE</button>
       </form>
       
       <p class="hint">
-        <span class="prompt">$</span> <span style="color:#666"># 例如</span> <code>torvalds/linux</code> <span style="color:#666">或</span> <code>https://github.com/vuejs/core</code>
+        <span class="prompt">$</span> <span style="color:#666"># 例如</span> <code>torvalds/linux</code><span style="color:#666">、</span><code>react hooks</code> <span style="color:#666">或</span> <code>https://github.com/vuejs/core</code>
       </p>
       
       <div class="prompt-line" style="margin-top: 2rem;">
@@ -1132,17 +1132,19 @@ function go() {
     v = ghMatch[1];
   } else if (/^https?:\\/\\//i.test(v)) {
     location.href = '/not_found';
-    return false; 
+    return false;
   }
 
   v = v.replace(/^\\/+/, '');
 
-  const isValidPath = /^[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)*\\/?$/.test(v);
+  // owner/repo 或 owner 格式 → 直接跳转
+  const isPathLike = /^[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)*\\/?$/.test(v);
 
-  if (isValidPath) {
+  if (isPathLike) {
     location.href = '/' + v;
   } else {
-    location.href = '/not_found';
+    // 其他输入视为搜索关键词
+    location.href = '/search?q=' + encodeURIComponent(v);
   }
 
   return false;
