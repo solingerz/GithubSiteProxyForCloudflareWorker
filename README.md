@@ -15,8 +15,11 @@
 - 特殊路径修复：内置 `latest-commit`、`tree-commit-info` 等嵌套 URL 修复逻辑。
 - 基础 CORS 支持：处理预检请求，并把跨域所需响应头补齐。
 - 安全清洗：会剥离 `Authorization`、真实 IP、转发链等敏感请求头，只保留匿名访问所需的少量 Cookie。
-- 超时与缓存控制：上游请求超时为 15 秒，并按内容类型设置不同缓存策略。
-- 可选地域回源：支持按国家/地区直接回源到真实站点，但默认关闭。
+- 只读代理模式：仅允许 GET 和 HEAD 请求，所有写操作（POST/PUT/DELETE/PATCH 等）返回 405，从源头杜绝误操作风险。
+- Cache API 缓存层：通过 Cloudflare `caches.default` 缓存上游 200 响应，按内容类型设置不同缓存策略，减少重复请求。默认 TTL 300 秒，可通过配置调整。
+- 超时控制：上游请求超时为 15 秒。
+- 入口页搜索跳转：首页输入框除支持 `owner/repo` 和完整 URL 外，还支持输入任意关键词直接跳转到 GitHub 搜索结果。
+- 可选地域回源：支持按国家/地区直接回源到真实站点，默认开启。
 
 ## 默认白名单域名
 
@@ -42,10 +45,11 @@ const PROXY_DOMAIN_SUFFIX = 'example.com';
 那么当前实现生成的部分映射如下：
 
 - 入口主页：`gh.example.com`
-- `github.com` -> `p1mmyth9b36hjt-gh.example.com`
-- `raw.githubusercontent.com` -> `pyuecc1dhdh1t-gh.example.com`
-- `api.github.com` -> `p1hqex1sp2ddwz-gh.example.com`
-- `gist.github.com` -> `pgm26gib2xfx8-gh.example.com`
+- `github.com` -> `p7ja1-gh.example.com`
+- `raw.githubusercontent.com` -> `p7yxd-gh.example.com`
+- `api.github.com` -> `p5cc3-gh.example.com`
+- `gist.github.com` -> `p1ql8-gh.example.com`
+- `avatars.githubusercontent.com` -> `pekbh-gh.example.com`
 
 这些哈希映射由域名本身确定性计算得出，不依赖数组顺序。
 
@@ -55,15 +59,19 @@ const PROXY_DOMAIN_SUFFIX = 'example.com';
 
 ```js
 const PROXY_DOMAIN_SUFFIX = 'example.com';
-const ENABLE_GEO_REDIRECT = false;
+const ENABLE_GEO_REDIRECT = true;
 const ALLOWED_COUNTRIES = ['CN'];
 const ENABLE_STRICT_DEFENSE = true;
+const ENABLE_CACHE = true;
+const CACHE_TTL = 300;
 ```
 
 - `PROXY_DOMAIN_SUFFIX`：必填，你自己的主域名。
-- `ENABLE_GEO_REDIRECT`：是否把指定地区以外的访问直接跳回真实上游域名，默认 `false`。
+- `ENABLE_GEO_REDIRECT`：是否把指定地区以外的访问直接跳回真实上游域名，默认 `true`。
 - `ALLOWED_COUNTRIES`：仅在开启地域回源时生效，默认只允许 `CN` 继续走代理。
 - `ENABLE_STRICT_DEFENSE`：是否额外拦截常见后台、探测、扫描类路径，默认开启。
+- `ENABLE_CACHE`：是否启用 Cache API 缓存层，默认 `true`。
+- `CACHE_TTL`：缓存默认 TTL（秒），仅在上游无明确 `Cache-Control` 时使用，默认 `300`。
 
 另外还有两个与行为强相关的常量：
 
@@ -72,22 +80,12 @@ const ENABLE_STRICT_DEFENSE = true;
 
 ## 部署
 
-### 方式一：Cloudflare Dashboard
+### Cloudflare Dashboard
 
 1. 在 Cloudflare 控制台创建一个 Worker。
 2. 将 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 的内容粘贴到 Worker 编辑器中。
 3. 修改 `PROXY_DOMAIN_SUFFIX` 等配置。
 4. 保存并部署。
-
-### 方式二：Wrangler
-
-仓库已经包含 [wrangler.toml](/workspaces/GithubSiteProxyForCloudflareWorker/wrangler.toml)，也可以直接用 Wrangler 部署：
-
-```bash
-wrangler deploy
-```
-
-部署前同样需要先修改 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 里的域名配置。
 
 ### DNS 与 Routes
 
@@ -112,12 +110,17 @@ wrangler deploy
 
 - 首页：`https://gh.<你的域名>`
 - 直达仓库：`https://gh.<你的域名>/vuejs/core`
-- 首页输入框支持两种输入：`owner/repo` 或 `https://github.com/owner/repo`
+- 首页输入框支持四种输入：
+  - `owner/repo` — 直达仓库
+  - `https://github.com/owner/repo` — 识别 GitHub URL 并跳转
+  - 白名单域名 URL（如 `https://avatars.githubusercontent.com/u/123`）— 自动跳转到对应代理子域
+  - 任意关键词 — 跳转 GitHub 搜索
 
 入口域名收到非首页请求后，会自动 302 到对应的哈希代理子域。后续页面里涉及的 Raw、头像、静态资源、Docs、Gist、NPM 等白名单域名，也会自动改写到对应代理域名。
 
 ## 安全策略与限制
 
+- 只读代理：仅允许 GET/HEAD 请求，POST/PUT/DELETE/PATCH 等写操作直接返回 405。
 - 仅支持匿名公开访问，不支持登录、注册、账号设置、通知、组织管理、支付、Copilot、Marketplace 等需要身份态或高风险的页面。
 - 会拦截常见敏感查询参数：`return_to`、`redirect_to`、`next`、`continue`、`destination`。
 - 会移除 URL 中的 `access_token`、`token` 等参数。

@@ -1122,6 +1122,7 @@ ${COMMON_CSS}
 </div>
 
 <script>
+var DOMAIN_MAP = ${JSON.stringify(domain_mappings)};
 function go() {
   const inputEl = document.getElementById('u');
   if (!inputEl) return false;
@@ -1133,8 +1134,15 @@ function go() {
   if (ghMatch) {
     v = ghMatch[1];
   } else if (/^https?:\\/\\//i.test(v)) {
-    location.href = '/not_found';
-    return false;
+    try {
+      const u = new URL(v);
+      const h = u.hostname.toLowerCase();
+      const proxy = DOMAIN_MAP[h] || DOMAIN_MAP[h.replace(/^www\\./, '')];
+      if (proxy) {
+        location.href = 'https://' + proxy + u.pathname + u.search;
+        return false;
+      }
+    } catch (_) {}
   }
 
   v = v.replace(/^\\/+/, '');
