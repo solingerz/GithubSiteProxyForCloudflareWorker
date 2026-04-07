@@ -1298,6 +1298,26 @@ function handleEntryRequest(url, origin) {
   if (['/favicon.ico', '/robots.txt'].includes(url.pathname)) {
     return new Response(null, { status: 404 });
   }
+
+  const NOT_FOUND = () => htmlResponse(buildNotFoundHtml(), 404, origin);
+
+  const decodedPath = safeDecodeURI(url.pathname);
+  if (
+    githubRedirectPatterns.some(re => re.test(url.pathname)) ||
+    githubRedirectPatterns.some(re => re.test(decodedPath))
+  ) {
+    return NOT_FOUND();
+  }
+  if (ENABLE_STRICT_DEFENSE && (
+    extraDefensePatterns.some(re => re.test(url.pathname)) ||
+    extraDefensePatterns.some(re => re.test(decodedPath))
+  )) {
+    return NOT_FOUND();
+  }
+  if (hasSensitiveQueryParam(url.search)) {
+    return NOT_FOUND();
+  }
+
   const redir = new URL(url);
   redir.host = getProxyHostByOrigin('github.com');
   return Response.redirect(redir.toString(), 302);
