@@ -4,7 +4,7 @@ const ENTRY_DOMAIN = 'gh.' + PROXY_DOMAIN_SUFFIX;
 const PROXY_LABEL_PREFIX = 'p';
 const PROXY_LABEL_SUFFIX = '-gh';
 
-const ENABLE_GEO_REDIRECT = false;
+const ENABLE_GEO_REDIRECT = true;
 const ALLOWED_COUNTRIES = ['CN'];
 const ENABLE_STRICT_DEFENSE = true;
 
@@ -32,7 +32,6 @@ const STRIP_RESP_HEADERS = [
 
 const MAX_REWRITE_SIZE = 5 * 1024 * 1024; // 5MB
 const UPSTREAM_TIMEOUT_MS = 15000;
-const GITHUB_TOKEN = ''; // 可选：填入 Fine-grained personal access tokens，未认证 60 次/小时 → 认证后 5000 次/小时
 const ENABLE_CACHE = true; // 启用 Cache API 缓存层，减少上游请求
 const CACHE_TTL = 300; // 缓存默认 TTL（秒），仅在上游无明确 Cache-Control 时使用
 
@@ -107,7 +106,6 @@ function buildStaticProxyHost(domain) {
 }
 
 function stableDomainHash(input) {
-  // FNV-1a 64-bit：同步、确定性、适合生成稳定短标签。
   let hash = 0xcbf29ce484222325n;
   const prime = 0x100000001b3n;
 
@@ -116,7 +114,8 @@ function stableDomainHash(input) {
     hash = (hash * prime) & 0xffffffffffffffffn;
   }
 
-  return hash.toString(36);
+  const short = hash & 0xFFFFFn;
+  return short.toString(36).padStart(4, '0');
 }
 
 function buildStaticDomainEntries(domains) {
@@ -1263,11 +1262,11 @@ document.getElementById('error-path').textContent = window.location.href;
 // 统一入口，根据请求域名分发到入口页或代理逻辑。
 export default {
   async fetch(request, env, ctx) {
-    return handleRequest(request);
+    return handleRequest(request, ctx);
   },
 };
 
-async function handleRequest(request) {
+async function handleRequest(request, ctx) {
   const url = new URL(request.url);
   const origin = request.headers.get('Origin') || '';
   const effectiveHost = stripPort(request.headers.get('Host') || url.host);
@@ -1281,7 +1280,7 @@ async function handleRequest(request) {
     return handleEntryRequest(url, origin);
   }
 
-  return handleProxyRequest(request, url, origin, effectiveHost);
+  return handleProxyRequest(request, url, origin, effectiveHost, ctx);
 }
 
 function handleEntryRequest(url, origin) {
@@ -1296,7 +1295,7 @@ function handleEntryRequest(url, origin) {
   return Response.redirect(redir.toString(), 302);
 }
 
-async function handleProxyRequest(request, url, origin, effectiveHost) {
+async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
   const NOT_FOUND = () => htmlResponse(buildNotFoundHtml(), 404, origin);
 
   const hostPrefix = getProxyPrefix(effectiveHost);
@@ -1412,10 +1411,6 @@ async function handleProxyRequest(request, url, origin, effectiveHost) {
     headers.delete(h);
   }
 
-  // 如果配置了 GitHub Token，注入认证头以提升速率限制配额。
-  if (GITHUB_TOKEN) {
-    headers.set('Authorization', `token ${GITHUB_TOKEN}`);
-  }
 
   // 仅转发匿名访问所需的 Cookie。
   const safeCookie = sanitizeCookies(headers.get('cookie') || '');
@@ -1437,7 +1432,9 @@ async function handleProxyRequest(request, url, origin, effectiveHost) {
       // 命中缓存：改写 CORS 头后直接返回。
       const cachedHeaders = new Headers(cached.headers);
       applyCorsHeaders(cachedHeaders, origin);
-      return new Response(cached.body, { status: cached.status, headers: cachedHeaders });
+      // HEAD 请求不应返回 body
+      const cachedBody = request.method === 'HEAD' ? null : cached.body;
+      return new Response(cachedBody, { status: cached.status, headers: cachedHeaders });
     }
   }
 
@@ -1514,11 +1511,9 @@ async function handleProxyRequest(request, url, origin, effectiveHost) {
           const cacheHeaders = new Headers(toCache.headers);
           cacheHeaders.set('cache-control', `public, s-maxage=${CACHE_TTL}`);
           const cacheResp = new Response(toCache.body, { status: toCache.status, headers: cacheHeaders });
-          // waitUntil 不阻塞响应返回。
-          // cache.put 在 Worker 全局上下文中自动排队，无需 ctx.waitUntil。
-          cache.put(cacheKey, cacheResp).catch(() => {});
+          ctx.waitUntil(cache.put(cacheKey, cacheResp));
         } else {
-          cache.put(cacheKey, toCache).catch(() => {});
+          ctx.waitUntil(cache.put(cacheKey, toCache));
         }
       }
     }
