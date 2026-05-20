@@ -28,7 +28,7 @@
 - GitHub 主站与 API：`github.com`、`api.github.com`、`gist.github.com`
 - 静态资源：`github.githubassets.com`、`assets-cdn.github.com`、`cdn.jsdelivr.net`、`github.global.ssl.fastly.net`
 - 下载相关：`codeload.github.com`、`git-lfs.github.com`
-- `githubusercontent` 相关：`githubusercontent.com`、`raw.githubusercontent.com`、`gist.githubusercontent.com`、`avatars.githubusercontent.com`、`camo.githubusercontent.com`、`objects.githubusercontent.com`、`media.githubusercontent.com`、`cloud.githubusercontent.com`、`user-images.githubusercontent.com`、`favicons.githubusercontent.com`、`repository-images.githubusercontent.com`、`render.githubusercontent.com`
+- `githubusercontent` 相关：`githubusercontent.com`、`raw.githubusercontent.com`、`gist.githubusercontent.com`、`avatars.githubusercontent.com`、`camo.githubusercontent.com`、`objects.githubusercontent.com`、`release-assets.githubusercontent.com`、`media.githubusercontent.com`、`cloud.githubusercontent.com`、`user-images.githubusercontent.com`、`favicons.githubusercontent.com`、`repository-images.githubusercontent.com`、`render.githubusercontent.com`
 - GitHub 子站：`docs.github.com`、`education.github.com`、`securitylab.github.com`、`desktop.github.com`、`pages.github.com`
 - 状态与公开 NPM 服务：`www.githubstatus.com`、`npmjs.com`、`api.npms.io`
 

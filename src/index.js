@@ -76,6 +76,7 @@ const domain_whitelist = [
   'avatars.githubusercontent.com',
   'camo.githubusercontent.com',
   'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
   'media.githubusercontent.com',
   'cloud.githubusercontent.com',
   'user-images.githubusercontent.com',
