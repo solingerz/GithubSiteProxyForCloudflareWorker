@@ -15,7 +15,7 @@
 - 特殊路径修复：内置 `latest-commit`、`tree-commit-info` 等嵌套 URL 修复逻辑。
 - 基础 CORS 支持：处理预检请求，并把跨域所需响应头补齐。
 - 安全清洗：会剥离 `Authorization`、真实 IP、转发链等敏感请求头，只保留匿名访问所需的少量 Cookie。
-- 只读代理模式：仅允许 GET 和 HEAD 请求，所有写操作（POST/PUT/DELETE/PATCH 等）返回 405，从源头杜绝误操作风险。
+- 只读代理模式：允许 GET、HEAD，以及 Git Smart HTTP 匿名 clone/fetch 所需的 `git-upload-pack` POST；其他写操作（PUT/DELETE/PATCH、`git-receive-pack` 等）返回 405。
 - Cache API 缓存层：通过 Cloudflare `caches.default` 缓存上游 200 响应，按内容类型设置不同缓存策略，减少重复请求。默认 TTL 300 秒，可通过配置调整。
 - 超时控制：上游请求超时为 15 秒。
 - 入口页搜索跳转：首页输入框除支持 `owner/repo` 和完整 URL 外，还支持输入任意关键词直接跳转到 GitHub 搜索结果。
@@ -110,6 +110,7 @@ const CACHE_TTL = 300;
 
 - 首页：`https://gh.<你的域名>`
 - 直达仓库：`https://gh.<你的域名>/vuejs/core`
+- Git clone：`git clone https://<github.com 对应的代理子域>/facebook/create-react-app.git`
 - 首页输入框支持四种输入：
   - `owner/repo` — 直达仓库
   - `https://github.com/owner/repo` — 识别 GitHub URL 并跳转
@@ -120,14 +121,14 @@ const CACHE_TTL = 300;
 
 ## 安全策略与限制
 
-- 只读代理：仅允许 GET/HEAD 请求，POST/PUT/DELETE/PATCH 等写操作直接返回 405。
+- 只读代理：仅允许 GET/HEAD 和 Git Smart HTTP 的 `POST /owner/repo.git/git-upload-pack`；push 使用的 `git-receive-pack`、API 写操作、PUT/DELETE/PATCH 等请求仍会返回 405。
 - 仅支持匿名公开访问，不支持登录、注册、账号设置、通知、组织管理、支付、Copilot、Marketplace 等需要身份态或高风险的页面。
 - 会拦截常见敏感查询参数：`return_to`、`redirect_to`、`next`、`continue`、`destination`。
 - 会移除 URL 中的 `access_token`、`token` 等参数。
 - 会移除 `authorization`、`x-forwarded-*`、`cf-connecting-ip`、`x-real-ip` 等敏感请求头。
 - 只允许透传 `_gh_sess` 和 `_octo` 两个匿名访问相关 Cookie，并限制单个值长度。
 - 对于超过 5MB 的文本响应，不会做正文替换，因此极大文本页面可能仍保留原始域名引用。
-- 项目主要面向浏览器访问与公开资源下载，不能替代 `git clone`、SSH、GitHub CLI 登录态操作。
+- 支持公开仓库的匿名 `git clone` / `git fetch`；不支持 SSH、GitHub CLI 登录态操作、私有仓库或需要认证的 Git 操作。
 
 ## 故障排查
 

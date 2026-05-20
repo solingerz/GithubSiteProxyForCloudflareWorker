@@ -297,7 +297,7 @@ const extraDefensePatterns = [
 // ===================== CORS =====================
 function corsHeaders(origin) {
   const h = {
-    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+    'access-control-allow-methods': 'GET, HEAD, POST, OPTIONS',
     'access-control-allow-headers': '*',
     'access-control-expose-headers': '*',
     'access-control-max-age': '86400',
@@ -447,6 +447,30 @@ function shouldRedirectGithubProxyRootToEntry(request, pathname, currentOrigin) 
   return accept.includes('text/html');
 }
 
+function isGitUploadPackPath(pathname) {
+  return /^\/[^/]+\/[^/]+\.git\/git-upload-pack$/i.test(pathname);
+}
+
+function isGitUploadPackDiscovery(pathname, search) {
+  if (!/^\/[^/]+\/[^/]+\.git\/info\/refs$/i.test(pathname)) return false;
+
+  const params = new URLSearchParams((search || '').replace(/^\?/, ''));
+  return params.get('service') === 'git-upload-pack';
+}
+
+function isAllowedProxyMethod(request, currentOrigin, pathname) {
+  if (request.method === 'GET' || request.method === 'HEAD') return true;
+  if (request.method !== 'POST') return false;
+  if (currentOrigin !== 'github.com') return false;
+
+  return isGitUploadPackPath(pathname);
+}
+
+function shouldBypassCache(request, pathname, search) {
+  if (request.method === 'POST') return true;
+  return isGitUploadPackDiscovery(pathname, search);
+}
+
 // 递归解码并规范化路径，减少双重编码和冗余路径片段的影响。
 function safeDecodeURI(str) {
   let prev = str;
@@ -525,6 +549,10 @@ function fixCommitInfoPath(pathname) {
 function computeCacheControl(contentType, upstreamCacheControl) {
   const ct = (contentType || '').toLowerCase();
   const upCC = (upstreamCacheControl || '').toLowerCase();
+
+  if (ct.includes('application/x-git-')) {
+    return 'no-store, no-cache, must-revalidate';
+  }
 
   if (upCC.includes('no-store') || upCC.includes('no-cache') || upCC.includes('private')) {
     return 'no-store, no-cache, must-revalidate';
@@ -1360,19 +1388,19 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
     });
   }
 
-  // 只读代理：仅允许 GET / HEAD，拒绝所有写操作。
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return new Response('Method Not Allowed', {
-      status: 405,
-      headers: { ...Object.fromEntries(applyCorsHeaders(new Headers(), origin)), 'Allow': 'GET, HEAD, OPTIONS' },
-    });
-  }
-
   const originalPath = url.pathname;
   const originalSearch = url.search || '';
   const extracted = extractTargetFromPath(originalPath);
   const canonicalPath = extracted?.pathname ?? originalPath;
   const mergedSearch = mergeSearch(originalSearch, extracted?.search || '');
+
+  // 只读代理：允许 GET / HEAD，以及 Git Smart HTTP clone/fetch 所需的 upload-pack POST。
+  if (!isAllowedProxyMethod(request, currentOrigin, canonicalPath)) {
+    return new Response('Method Not Allowed', {
+      status: 405,
+      headers: { ...Object.fromEntries(applyCorsHeaders(new Headers(), origin)), 'Allow': 'GET, HEAD, POST, OPTIONS' },
+    });
+  }
 
   if (shouldRedirectGithubProxyRootToEntry(request, canonicalPath, currentOrigin)) {
     return Response.redirect(`https://${ENTRY_DOMAIN}/`, 302);
@@ -1467,7 +1495,7 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
   }
 
   // ── Cache API 缓存层 ──
-  const canReadCache = ENABLE_CACHE && !safeCookie && (request.method === 'GET' || request.method === 'HEAD');
+  const canReadCache = ENABLE_CACHE && !safeCookie && !shouldBypassCache(request, pathname, mergedSearch) && (request.method === 'GET' || request.method === 'HEAD');
   const canWriteCache = canReadCache && request.method === 'GET';
   const cache = canReadCache ? caches.default : null;
   // 用上游 URL 做缓存键，确保不同代理子域共享同一缓存条目。
@@ -1493,6 +1521,7 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
     const resp = await fetch(upstream.href, {
       method: request.method,
       headers,
+      body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
       redirect: 'manual',
       signal: controller.signal,
     });
