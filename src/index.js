@@ -33,8 +33,8 @@ const STRIP_RESP_HEADERS = [
 
 const MAX_REWRITE_SIZE = 5 * 1024 * 1024; // 5MB
 const UPSTREAM_TIMEOUT_MS = 15000;
-const ENABLE_CACHE = true; // 启用 Cache API 缓存层，减少上游请求
-const CACHE_TTL = 300; // 缓存默认 TTL（秒），仅在上游无明确 Cache-Control 时使用
+const GITHUB_TOKEN_ENV = 'GITHUB_TOKEN';
+const GITHUB_TOKEN_METHODS = new Set(['GET', 'HEAD']);
 
 const ALLOWED_COOKIES = new Set(['_gh_sess', '_octo']);
 const MAX_COOKIE_VALUE_LENGTH = 512;
@@ -452,13 +452,6 @@ function isGitUploadPackPath(pathname) {
   return /^\/[^/]+\/[^/]+\.git\/git-upload-pack$/i.test(pathname);
 }
 
-function isGitUploadPackDiscovery(pathname, search) {
-  if (!/^\/[^/]+\/[^/]+\.git\/info\/refs$/i.test(pathname)) return false;
-
-  const params = new URLSearchParams((search || '').replace(/^\?/, ''));
-  return params.get('service') === 'git-upload-pack';
-}
-
 function isAllowedProxyMethod(request, currentOrigin, pathname) {
   if (request.method === 'GET' || request.method === 'HEAD') return true;
   if (request.method !== 'POST') return false;
@@ -467,9 +460,75 @@ function isAllowedProxyMethod(request, currentOrigin, pathname) {
   return isGitUploadPackPath(pathname);
 }
 
-function shouldBypassCache(request, pathname, search) {
-  if (request.method === 'POST') return true;
-  return isGitUploadPackDiscovery(pathname, search);
+function shouldBlockGithubWebPath(currentOrigin, pathname) {
+  if (currentOrigin !== 'github.com') return false;
+  return githubRedirectPatterns.some(re => re.test(pathname));
+}
+
+function isGitHubTokenOrigin(origin) {
+  const host = stripPort(origin);
+  return (
+    host === 'github.com' ||
+    host.endsWith('.github.com') ||
+    host === 'githubusercontent.com' ||
+    host.endsWith('.githubusercontent.com') ||
+    host === 'github.githubassets.com' ||
+    host === 'assets-cdn.github.com'
+  );
+}
+
+function getGitHubToken(env) {
+  const token = env?.[GITHUB_TOKEN_ENV];
+  return typeof token === 'string' ? token.trim() : '';
+}
+
+function isSensitiveGitHubApiPath(pathname) {
+  const decodedPath = safeDecodeURI(pathname);
+
+  return [
+    // Token / identity context.
+    /^\/(?:user|notifications|authorizations|applications|installation|installations|app)(?:\/|$)/i,
+
+    // Repository administration or security metadata.
+    /^\/repos\/[^/]+\/[^/]+\/(?:actions\/secrets|actions\/runners|collaborators|deployments|environments|hooks|keys|rules|rulesets|secret-scanning|code-scanning|dependabot|vulnerability-alerts|automated-security-fixes|traffic)(?:\/|$)/i,
+
+    // Organization administration metadata.
+    /^\/orgs\/[^/]+\/(?:credential-authorizations|personal-access-tokens|outside-collaborators|hooks|installations|actions\/secrets|actions\/runners|security-managers)(?:\/|$)/i,
+
+    // Enterprise and billing/admin surfaces should never use a shared proxy token.
+    /^\/(?:enterprises|organizations|billing|marketplace_listing)(?:\/|$)/i,
+  ].some(re => re.test(decodedPath));
+}
+
+function isSensitiveGitHubTokenPath(currentOrigin, pathname) {
+  if (currentOrigin === 'api.github.com') return isSensitiveGitHubApiPath(pathname);
+  if (currentOrigin === 'github.com') return shouldBlockGithubWebPath(currentOrigin, pathname);
+  return false;
+}
+
+function isHtmlNavigationRequest(request) {
+  const accept = (request.headers.get('accept') || '').toLowerCase();
+  return accept.includes('text/html');
+}
+
+function shouldAttachGitHubToken(request, currentOrigin, pathname) {
+  if (!isGitHubTokenOrigin(currentOrigin)) return false;
+  if (!GITHUB_TOKEN_METHODS.has(request.method)) return false;
+  if (isSensitiveGitHubTokenPath(currentOrigin, pathname)) return false;
+
+  // GitHub 主站 HTML 不使用服务端 token，避免返回 token 持有者上下文相关页面。
+  if (currentOrigin === 'github.com' && isHtmlNavigationRequest(request)) return false;
+
+  return true;
+}
+
+function attachGitHubToken(headers, env, request, currentOrigin, pathname) {
+  if (!shouldAttachGitHubToken(request, currentOrigin, pathname)) return;
+
+  const token = getGitHubToken(env);
+  if (!token) return;
+
+  headers.set('Authorization', `Bearer ${token}`);
 }
 
 // 递归解码并规范化路径，减少双重编码和冗余路径片段的影响。
@@ -544,34 +603,6 @@ function fixCommitInfoPath(pathname) {
   }
   const segments = parsedUrl.pathname.split('/').slice(3).join('/');
   return segments ? `${prefix}/${segments}` : prefix;
-}
-
-// ===================== 缓存策略 =====================
-function computeCacheControl(contentType, upstreamCacheControl) {
-  const ct = (contentType || '').toLowerCase();
-  const upCC = (upstreamCacheControl || '').toLowerCase();
-
-  if (ct.includes('application/x-git-')) {
-    return 'no-store, no-cache, must-revalidate';
-  }
-
-  if (upCC.includes('no-store') || upCC.includes('no-cache') || upCC.includes('private')) {
-    return 'no-store, no-cache, must-revalidate';
-  }
-
-  if (ct.includes('application/json')) {
-    return 'public, max-age=60, s-maxage=60';
-  }
-  if (ct.includes('text/html')) {
-    return 'public, max-age=300, s-maxage=300';
-  }
-  if (ct.includes('javascript') || ct.includes('text/css')) {
-    return 'public, max-age=86400, s-maxage=86400';
-  }
-  if (ct.includes('image/') || ct.includes('font/') || ct.includes('application/octet-stream')) {
-    return 'public, max-age=86400, s-maxage=86400';
-  }
-  return 'public, max-age=14400';
 }
 
 // ===================== 地理重定向 =====================
@@ -1316,12 +1347,12 @@ document.getElementById('error-path').textContent = window.location.href;
 
 // 统一入口，根据请求域名分发到入口页或代理逻辑。
 export default {
-  async fetch(request, env, ctx) {
-    return handleRequest(request, ctx);
+  async fetch(request, env) {
+    return handleRequest(request, env);
   },
 };
 
-async function handleRequest(request, ctx) {
+async function handleRequest(request, env) {
   const url = new URL(request.url);
   const origin = request.headers.get('Origin') || '';
   const effectiveHost = stripPort(request.headers.get('Host') || url.host);
@@ -1335,7 +1366,7 @@ async function handleRequest(request, ctx) {
     return handleEntryRequest(url, origin);
   }
 
-  return handleProxyRequest(request, url, origin, effectiveHost, ctx);
+  return handleProxyRequest(request, url, origin, effectiveHost, env);
 }
 
 function handleEntryRequest(url, origin) {
@@ -1370,7 +1401,7 @@ function handleEntryRequest(url, origin) {
   return Response.redirect(redir.toString(), 302);
 }
 
-async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
+async function handleProxyRequest(request, url, origin, effectiveHost, env) {
   const NOT_FOUND = () => htmlResponse(buildNotFoundHtml(), 404, origin);
 
   const hostPrefix = getProxyPrefix(effectiveHost);
@@ -1410,8 +1441,8 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
   // 对路径做解码和规范化后再进行敏感路径检测。
   const decodedPath = safeDecodeURI(canonicalPath);
   if (
-    githubRedirectPatterns.some(re => re.test(canonicalPath)) ||
-    githubRedirectPatterns.some(re => re.test(decodedPath))
+    shouldBlockGithubWebPath(currentOrigin, canonicalPath) ||
+    shouldBlockGithubWebPath(currentOrigin, decodedPath)
   ) {
     return NOT_FOUND();
   }
@@ -1495,24 +1526,7 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
     headers.delete('cookie');
   }
 
-  // ── Cache API 缓存层 ──
-  const canReadCache = ENABLE_CACHE && !safeCookie && !shouldBypassCache(request, pathname, mergedSearch) && (request.method === 'GET' || request.method === 'HEAD');
-  const canWriteCache = canReadCache && request.method === 'GET';
-  const cache = canReadCache ? caches.default : null;
-  // 用上游 URL 做缓存键，确保不同代理子域共享同一缓存条目。
-  const cacheKey = canReadCache ? new Request(upstream.href, { method: 'GET' }) : null;
-
-  if (cache && cacheKey) {
-    const cached = await cache.match(cacheKey);
-    if (cached) {
-      // 命中缓存：改写 CORS 头后直接返回。
-      const cachedHeaders = new Headers(cached.headers);
-      applyCorsHeaders(cachedHeaders, origin);
-      // HEAD 请求不应返回 body
-      const cachedBody = request.method === 'HEAD' ? null : cached.body;
-      return new Response(cachedBody, { status: cached.status, headers: cachedHeaders });
-    }
-  }
+  attachGitHubToken(headers, env, request, currentOrigin, pathname);
 
   // 为上游请求设置超时控制。
   const controller = new AbortController();
@@ -1560,13 +1574,9 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
       }
     }
 
-    const ct = resp.headers.get('content-type') || '';
-    const upstreamCC = resp.headers.get('cache-control') || '';
-
     const respHeaders = new Headers(resp.headers);
     applyCorsHeaders(respHeaders, origin);
 
-    respHeaders.set('cache-control', computeCacheControl(ct, upstreamCC));
     stripUnsafeResponseHeaders(respHeaders);
 
     if (resp.status === 404) {
@@ -1580,26 +1590,7 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
     // 直接消费上游响应体并按需改写。
     const body = await modifyResponse(resp);
 
-    const finalResponse = new Response(body, { status: resp.status, headers: respHeaders });
-
-    // 仅缓存 200 且上游未明确禁止缓存的 GET 响应。
-    if (cache && cacheKey && canWriteCache && resp.status === 200) {
-      const ccLower = (respHeaders.get('cache-control') || '').toLowerCase();
-      if (!ccLower.includes('no-store') && !ccLower.includes('private')) {
-        const toCache = finalResponse.clone();
-        // 如果上游未提供明确的 max-age，用默认 TTL 确保缓存会过期。
-        if (!ccLower.includes('max-age') && !ccLower.includes('s-maxage')) {
-          const cacheHeaders = new Headers(toCache.headers);
-          cacheHeaders.set('cache-control', `public, s-maxage=${CACHE_TTL}`);
-          const cacheResp = new Response(toCache.body, { status: toCache.status, headers: cacheHeaders });
-          ctx.waitUntil(cache.put(cacheKey, cacheResp));
-        } else {
-          ctx.waitUntil(cache.put(cacheKey, toCache));
-        }
-      }
-    }
-
-    return finalResponse;
+    return new Response(body, { status: resp.status, headers: respHeaders });
   } catch (err) {
     clearTimeout(timeoutId);
 

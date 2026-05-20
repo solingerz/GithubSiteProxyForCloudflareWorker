@@ -15,8 +15,8 @@
 - 特殊路径修复：内置 `latest-commit`、`tree-commit-info` 等嵌套 URL 修复逻辑。
 - 基础 CORS 支持：处理预检请求，并把跨域所需响应头补齐。
 - 安全清洗：会剥离 `Authorization`、真实 IP、转发链等敏感请求头，只保留匿名访问所需的少量 Cookie。
+- GitHub Token：可通过 Worker secret 配置 `GITHUB_TOKEN`，仅对 GitHub 官方上游域名的 GET/HEAD 请求注入，并对身份、通知、授权和管理类路径做排除。
 - 只读代理模式：允许 GET、HEAD，以及 Git Smart HTTP 匿名 clone/fetch 所需的 `git-upload-pack` POST；其他写操作（PUT/DELETE/PATCH、`git-receive-pack` 等）返回 405。
-- Cache API 缓存层：通过 Cloudflare `caches.default` 缓存上游 200 响应，按内容类型设置不同缓存策略，减少重复请求。默认 TTL 300 秒，可通过配置调整。
 - 超时控制：上游请求超时为 15 秒。
 - 入口页搜索跳转：首页输入框除支持 `owner/repo` 和完整 URL 外，还支持输入任意关键词直接跳转到 GitHub 搜索结果。
 - 可选地域回源：支持按国家/地区直接回源到真实站点，默认开启。
@@ -55,23 +55,21 @@ const PROXY_DOMAIN_SUFFIX = 'example.com';
 
 ## 关键配置
 
-主要配置都在 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 顶部：
+主要配置都在 [src/index.js](/workspaces/gh-proxy/src/index.js) 顶部：
 
 ```js
 const PROXY_DOMAIN_SUFFIX = 'example.com';
 const ENABLE_GEO_REDIRECT = true;
 const ALLOWED_COUNTRIES = ['CN'];
 const ENABLE_STRICT_DEFENSE = true;
-const ENABLE_CACHE = true;
-const CACHE_TTL = 300;
+const GITHUB_TOKEN_ENV = 'GITHUB_TOKEN';
 ```
 
 - `PROXY_DOMAIN_SUFFIX`：必填，你自己的主域名。
 - `ENABLE_GEO_REDIRECT`：是否把指定地区以外的访问直接跳回真实上游域名，默认 `true`。
 - `ALLOWED_COUNTRIES`：仅在开启地域回源时生效，默认只允许 `CN` 继续走代理。
 - `ENABLE_STRICT_DEFENSE`：是否额外拦截常见后台、探测、扫描类路径，默认开启。
-- `ENABLE_CACHE`：是否启用 Cache API 缓存层，默认 `true`。
-- `CACHE_TTL`：缓存默认 TTL（秒），仅在上游无明确 `Cache-Control` 时使用，默认 `300`。
+- `GITHUB_TOKEN_ENV`：GitHub token 对应的 Worker secret 名称，默认 `GITHUB_TOKEN`。
 
 另外还有两个与行为强相关的常量：
 
@@ -83,9 +81,27 @@ const CACHE_TTL = 300;
 ### Cloudflare Dashboard
 
 1. 在 Cloudflare 控制台创建一个 Worker。
-2. 将 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 的内容粘贴到 Worker 编辑器中。
+2. 将 [src/index.js](/workspaces/gh-proxy/src/index.js) 的内容粘贴到 Worker 编辑器中。
 3. 修改 `PROXY_DOMAIN_SUFFIX` 等配置。
 4. 保存并部署。
+
+### GitHub Token
+
+如果需要提高 GitHub 公开资源访问额度，可以配置 Worker secret：
+
+```bash
+wrangler secret put GITHUB_TOKEN
+```
+
+代码只会在代理目标是 GitHub 官方上游域名且请求方法为 `GET`/`HEAD` 时注入该 token，例如 `github.com`、`api.github.com`、`raw.githubusercontent.com`、`codeload.github.com`、`release-assets.githubusercontent.com` 等。
+
+为避免 token 泄露或返回 token 持有者上下文数据，以下情况不会附带服务端 token：
+
+- 非 GitHub token 接收方：`cdn.jsdelivr.net`、`npmjs.com`、`api.npms.io`、`www.githubstatus.com`、`github.global.ssl.fastly.net` 等。
+- GitHub 主站 HTML 页面导航请求。
+- `api.github.com` 的身份、通知、授权、App/Installation、企业、计费、组织管理、仓库管理、安全扫描、Actions secrets/runners 等高风险路径。
+
+建议使用没有私有仓库权限的 token，不要使用带 `repo` 私有仓库权限的经典 token，也不要给 fine-grained token 授权私有仓库。否则访问者可能通过公共代理读取 token 可访问的私有 API 数据。
 
 ### DNS 与 Routes
 
@@ -126,6 +142,7 @@ const CACHE_TTL = 300;
 - 会拦截常见敏感查询参数：`return_to`、`redirect_to`、`next`、`continue`、`destination`。
 - 会移除 URL 中的 `access_token`、`token` 等参数。
 - 会移除 `authorization`、`x-forwarded-*`、`cf-connecting-ip`、`x-real-ip` 等敏感请求头。
+- 如果配置了 `GITHUB_TOKEN`，Worker 会在清理用户请求头之后，仅对安全范围内的 GitHub 官方上游请求注入服务端 token。
 - 只允许透传 `_gh_sess` 和 `_octo` 两个匿名访问相关 Cookie，并限制单个值长度。
 - 对于超过 5MB 的文本响应，不会做正文替换，因此极大文本页面可能仍保留原始域名引用。
 - 支持公开仓库的匿名 `git clone` / `git fetch`；不支持 SSH、GitHub CLI 登录态操作、私有仓库或需要认证的 Git 操作。
@@ -134,7 +151,7 @@ const CACHE_TTL = 300;
 
 1. 访问直接 404：先检查 Worker Routes 是否同时配置了 `gh.<域名>/*` 和 `*-gh.<域名>/*`。
 2. 出现证书问题：确认使用的是单级子域，例如 `p1mmyth9b36hjt-gh.example.com`，不要再套一层子域。
-3. 页面资源没有走代理：如果是新的上游域名，需要把它加入 [src/index.js](/workspaces/GithubSiteProxyForCloudflareWorker/src/index.js) 里的 `domain_whitelist`。
+3. 页面资源没有走代理：如果是新的上游域名，需要把它加入 [src/index.js](/workspaces/gh-proxy/src/index.js) 里的 `domain_whitelist`。
 4. 某些文本内容没有被改写：先确认响应是否超过 `5MB`，超过限制会直接透传。
 5. 想按地区自动回源：把 `ENABLE_GEO_REDIRECT` 改为 `true`，并按需调整 `ALLOWED_COUNTRIES` 后重新部署。
 
