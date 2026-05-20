@@ -26,6 +26,7 @@ const STRIP_RESP_HEADERS = [
   'content-security-policy',
   'content-security-policy-report-only',
   'clear-site-data',
+  'set-cookie',
   'x-frame-options',
   'content-length', // 内容经过改写，原始 content-length 不再准确
 ];
@@ -330,6 +331,19 @@ function applyCorsHeaders(headers, origin) {
   }
   if (origin) appendVaryHeader(headers, 'Origin');
   return headers;
+}
+
+function stripUnsafeResponseHeaders(headers) {
+  for (const h of STRIP_RESP_HEADERS) {
+    headers.delete(h);
+  }
+  return headers;
+}
+
+function wantsHtmlErrorPage(request) {
+  if (request.method === 'HEAD') return false;
+  const accept = (request.headers.get('accept') || '').toLowerCase();
+  return accept.includes('text/html');
 }
 
 function htmlResponse(html, status, origin) {
@@ -653,12 +667,11 @@ function sanitizeSearchParams(searchStr) {
   if (!searchStr) return '';
 
   const params = new URLSearchParams(searchStr.replace(/^\?/, ''));
-  let modified = false;
+  const sensitiveParams = new Set([...SENSITIVE_URL_PARAMS, ...SENSITIVE_QUERY_PARAMS]);
 
-  for (const param of [...SENSITIVE_URL_PARAMS, ...SENSITIVE_QUERY_PARAMS]) {
-    if (params.has(param)) {
-      params.delete(param);
-      modified = true;
+  for (const key of Array.from(params.keys())) {
+    if (sensitiveParams.has(key.toLowerCase())) {
+      params.delete(key);
     }
   }
 
@@ -670,9 +683,14 @@ function hasSensitiveQueryParam(searchStr) {
   if (!searchStr) return false;
 
   const params = new URLSearchParams(searchStr.replace(/^\?/, ''));
-  for (const param of SENSITIVE_QUERY_PARAMS) {
-    const value = params.get(param);
-    if (value && githubRedirectPatterns.some(re => re.test(value))) {
+  const sensitiveParams = new Set(SENSITIVE_QUERY_PARAMS);
+
+  for (const [key, value] of params) {
+    if (
+      sensitiveParams.has(key.toLowerCase()) &&
+      value &&
+      githubRedirectPatterns.some(re => re.test(value))
+    ) {
       return true;
     }
   }
@@ -1449,10 +1467,11 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
   }
 
   // ── Cache API 缓存层 ──
-  const isCacheable = ENABLE_CACHE && (request.method === 'GET' || request.method === 'HEAD');
-  const cache = isCacheable ? caches.default : null;
+  const canReadCache = ENABLE_CACHE && !safeCookie && (request.method === 'GET' || request.method === 'HEAD');
+  const canWriteCache = canReadCache && request.method === 'GET';
+  const cache = canReadCache ? caches.default : null;
   // 用上游 URL 做缓存键，确保不同代理子域共享同一缓存条目。
-  const cacheKey = isCacheable ? new Request(upstream.href, { method: 'GET' }) : null;
+  const cacheKey = canReadCache ? new Request(upstream.href, { method: 'GET' }) : null;
 
   if (cache && cacheKey) {
     const cached = await cache.match(cacheKey);
@@ -1503,14 +1522,13 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
         const redirectHeaders = new Headers(resp.headers);
         redirectHeaders.set('Location', newLoc);
         applyCorsHeaders(redirectHeaders, origin);
+        stripUnsafeResponseHeaders(redirectHeaders);
         return new Response(resp.body, {
           status: resp.status,
           headers: redirectHeaders,
         });
       }
     }
-
-    if (resp.status === 404) return NOT_FOUND();
 
     const ct = resp.headers.get('content-type') || '';
     const upstreamCC = resp.headers.get('cache-control') || '';
@@ -1519,9 +1537,14 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
     applyCorsHeaders(respHeaders, origin);
 
     respHeaders.set('cache-control', computeCacheControl(ct, upstreamCC));
+    stripUnsafeResponseHeaders(respHeaders);
 
-    for (const h of STRIP_RESP_HEADERS) {
-      respHeaders.delete(h);
+    if (resp.status === 404) {
+      if (wantsHtmlErrorPage(request)) return NOT_FOUND();
+      return new Response(request.method === 'HEAD' ? null : resp.body, {
+        status: resp.status,
+        headers: respHeaders,
+      });
     }
 
     // 直接消费上游响应体并按需改写。
@@ -1530,7 +1553,7 @@ async function handleProxyRequest(request, url, origin, effectiveHost, ctx) {
     const finalResponse = new Response(body, { status: resp.status, headers: respHeaders });
 
     // 仅缓存 200 且上游未明确禁止缓存的 GET 响应。
-    if (cache && cacheKey && resp.status === 200) {
+    if (cache && cacheKey && canWriteCache && resp.status === 200) {
       const ccLower = (respHeaders.get('cache-control') || '').toLowerCase();
       if (!ccLower.includes('no-store') && !ccLower.includes('private')) {
         const toCache = finalResponse.clone();
