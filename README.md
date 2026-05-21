@@ -18,7 +18,7 @@
 - GitHub Token：可通过 Worker secret 配置 `GITHUB_TOKEN`，仅对 GitHub 官方上游域名的 GET/HEAD 请求注入，并对身份、通知、授权和管理类路径做排除。
 - 只读代理模式：允许 GET、HEAD，以及 Git Smart HTTP 匿名 clone/fetch 所需的 `git-upload-pack` POST；其他写操作（PUT/DELETE/PATCH、`git-receive-pack` 等）返回 405。
 - 超时控制：上游请求超时为 15 秒。
-- 入口页搜索跳转：首页输入框除支持 `owner/repo` 和完整 URL 外，还支持输入任意关键词直接跳转到 GitHub 搜索结果。
+- API 驱动的搜索：首页输入框除支持 `owner/repo` 和完整 URL 外，还支持输入任意关键词打开本地 `/search` 页面，并通过 GitHub REST Search API 填充 Code、仓库、Issue、Pull request 和 Users 结果。
 - 可选地域回源：支持按国家/地区直接回源到真实站点，默认开启。
 
 ## 默认白名单域名
@@ -131,9 +131,11 @@ wrangler secret put GITHUB_TOKEN
   - `owner/repo` — 直达仓库
   - `https://github.com/owner/repo` — 识别 GitHub URL 并跳转
   - 白名单域名 URL（如 `https://avatars.githubusercontent.com/u/123`）— 自动跳转到对应代理子域
-  - 任意关键词 — 跳转 GitHub 搜索
+  - 任意关键词 — 打开本地仓库搜索页，结果来自 GitHub REST Search API
 
 入口域名收到非首页请求后，会自动 302 到对应的哈希代理子域。后续页面里涉及的 Raw、头像、静态资源、Docs、Gist、NPM 等白名单域名，也会自动改写到对应代理域名。
+
+`/search?q=<关键词>&type=code`、`/search?q=<关键词>&type=repositories`、`/search?q=<关键词>&type=issues`、`/search?q=<关键词>&type=pullrequests` 和 `/search?q=<关键词>&type=users` 由 Worker 自己渲染，不复制 GitHub Web 搜索页里的登录态、CSRF 表单和前端脚本。GitHub Code Search API 通常需要认证，建议配合 `GITHUB_TOKEN` 使用。
 
 ## 安全策略与限制
 

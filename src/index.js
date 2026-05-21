@@ -356,6 +356,212 @@ function htmlResponse(html, status, origin) {
   });
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
+function formatCompactNumber(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return '0';
+  if (n >= 1000000) return `${(n / 1000000).toFixed(n >= 10000000 ? 0 : 1).replace(/\.0$/, '')}m`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '')}k`;
+  return String(n);
+}
+
+function formatDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function buildQueryString(params) {
+  const out = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') {
+      out.set(key, String(value));
+    }
+  }
+  const s = out.toString();
+  return s ? `?${s}` : '';
+}
+
+function rewriteOriginalUrlToProxy(value) {
+  if (!value) return '';
+  try {
+    const u = new URL(value);
+    const proxyHost = getProxyHostByOrigin(u.hostname);
+    if (proxyHost) {
+      u.protocol = 'https:';
+      u.host = proxyHost;
+    }
+    return u.toString();
+  } catch (_) {
+    return value;
+  }
+}
+
+function normalizeSearchType(type) {
+  const value = String(type || 'repositories').toLowerCase();
+  return SEARCH_TYPE_ALIASES[value] || value;
+}
+
+function buildIssueSearchQuery(q, type) {
+  const base = String(q || '').replace(/\bis:(?:issue|pr)\b/gi, '').replace(/\s+/g, ' ').trim();
+  const qualifier = type === 'pullrequests' ? 'is:pr' : 'is:issue';
+  return `${base} ${qualifier}`.trim();
+}
+
+// Search type behavior lives in one table so adding a new tab is a data change,
+// not a chain of route/render conditionals.
+const SEARCH_TYPE_ALIASES = {
+  pr: 'pullrequests',
+  prs: 'pullrequests',
+  pull_request: 'pullrequests',
+  pull_requests: 'pullrequests',
+  'pull-request': 'pullrequests',
+  'pull-requests': 'pullrequests',
+};
+
+const SEARCH_TYPES = {
+  code: {
+    tab: 'Code',
+    label: 'code',
+    plural: 'code',
+    endpoint: 'https://api.github.com/search/code',
+    scope: 'Code search uses GitHub REST Code Search. It may require GITHUB_TOKEN.',
+    sorts: [
+      ['Best match', ''],
+      ['Recently indexed', 'indexed'],
+    ],
+    buildQuery: q => q,
+    renderResult: buildCodeResultHtml,
+  },
+  repositories: {
+    tab: 'Repositories',
+    label: 'repository',
+    plural: 'repositories',
+    endpoint: 'https://api.github.com/search/repositories',
+    scope: '',
+    sorts: [
+      ['Best match', ''],
+      ['Most stars', 'stars'],
+      ['Most forks', 'forks'],
+      ['Recently updated', 'updated'],
+    ],
+    buildQuery: q => q,
+    renderResult: buildRepositoryResultHtml,
+    renderFacet: buildRepositorySearchFacetHtml,
+  },
+  issues: {
+    tab: 'Issues',
+    label: 'issue',
+    plural: 'issues',
+    endpoint: 'https://api.github.com/search/issues',
+    scope: 'Only issues are included.',
+    sorts: [
+      ['Best match', ''],
+      ['Most commented', 'comments'],
+      ['Newest', 'created'],
+      ['Recently updated', 'updated'],
+    ],
+    buildQuery: q => buildIssueSearchQuery(q, 'issues'),
+    renderResult: buildIssueResultHtml,
+  },
+  pullrequests: {
+    tab: 'Pull requests',
+    label: 'pull request',
+    plural: 'pull requests',
+    endpoint: 'https://api.github.com/search/issues',
+    scope: 'Only pull requests are included.',
+    sorts: [
+      ['Best match', ''],
+      ['Most commented', 'comments'],
+      ['Newest', 'created'],
+      ['Recently updated', 'updated'],
+    ],
+    buildQuery: q => buildIssueSearchQuery(q, 'pullrequests'),
+    renderResult: buildIssueResultHtml,
+  },
+  users: {
+    tab: 'Users',
+    label: 'user',
+    plural: 'users',
+    endpoint: 'https://api.github.com/search/users',
+    scope: 'Users and organizations returned by GitHub user search.',
+    sorts: [
+      ['Best match', ''],
+      ['Most followers', 'followers'],
+      ['Most repositories', 'repositories'],
+      ['Recently joined', 'joined'],
+    ],
+    buildQuery: q => q,
+    renderResult: buildUserResultHtml,
+  },
+};
+
+function getSearchConfig(type) {
+  return SEARCH_TYPES[normalizeSearchType(type)] || null;
+}
+
+function getSearchSortValues(config) {
+  return new Set(config.sorts.map(([, value]) => value).filter(Boolean));
+}
+
+function parseSearchRequest(url) {
+  const type = normalizeSearchType(url.searchParams.get('type') || 'repositories');
+  return {
+    q: (url.searchParams.get('q') || '').trim().slice(0, 256),
+    type,
+    config: getSearchConfig(type),
+    page: Math.max(1, Math.min(Number.parseInt(url.searchParams.get('p') || url.searchParams.get('page') || '1', 10) || 1, 100)),
+    sort: (url.searchParams.get('sort') || '').toLowerCase(),
+    order: (url.searchParams.get('order') || '').toLowerCase() === 'asc' ? 'asc' : 'desc',
+  };
+}
+
+function buildSearchApiUrl({ q, config, page, sort, order }) {
+  const apiUrl = new URL(config.endpoint);
+  apiUrl.searchParams.set('q', config.buildQuery(q));
+  apiUrl.searchParams.set('per_page', '10');
+  apiUrl.searchParams.set('page', String(page));
+  if (getSearchSortValues(config).has(sort)) {
+    apiUrl.searchParams.set('sort', sort);
+    apiUrl.searchParams.set('order', order);
+  }
+  return apiUrl;
+}
+
+function buildSearchApiHeaders(env) {
+  const headers = new Headers({
+    'accept': 'application/vnd.github+json',
+    'user-agent': 'gh-proxy-search-ui',
+    'x-github-api-version': '2022-11-28',
+  });
+  const token = getGitHubToken(env);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return headers;
+}
+
+function readSearchRateLimit(headers) {
+  return {
+    limit: headers.get('x-ratelimit-limit') || '',
+    remaining: headers.get('x-ratelimit-remaining') || '',
+    used: headers.get('x-ratelimit-used') || '',
+    reset: headers.get('x-ratelimit-reset') || '',
+    resource: headers.get('x-ratelimit-resource') || '',
+  };
+}
+
 // ===================== 工具函数 =====================
 function stripPort(host) {
   return (host || '').toLowerCase().split(':')[0];
@@ -463,6 +669,11 @@ function isAllowedProxyMethod(request, currentOrigin, pathname) {
 function shouldBlockGithubWebPath(currentOrigin, pathname) {
   if (currentOrigin !== 'github.com') return false;
   return githubRedirectPatterns.some(re => re.test(pathname));
+}
+
+function shouldBlockStrictDefensePath(currentOrigin, pathname) {
+  if (currentOrigin === 'api.github.com') return false;
+  return extraDefensePatterns.some(re => re.test(pathname));
 }
 
 function isGitHubTokenOrigin(origin) {
@@ -1232,11 +1443,1160 @@ function go() {
     location.href = '/' + v;
   } else {
     // 其他输入视为搜索关键词
-    location.href = '/search?q=' + encodeURIComponent(v);
+    location.href = '/search?q=' + encodeURIComponent(v) + '&type=repositories';
   }
 
   return false;
 }
+</script>
+</body>
+</html>`;
+}
+
+async function handleSearchRequest(url, origin, env) {
+  const params = parseSearchRequest(url);
+
+  if (!params.q) {
+    return htmlResponse(buildSearchHtml({ ...params, result: null, error: null, rate: null }), 200, origin);
+  }
+
+  if (!params.config) {
+    const unsupportedType = params.type;
+    return htmlResponse(buildSearchHtml({
+      ...params,
+      type: 'repositories',
+      config: SEARCH_TYPES.repositories,
+      result: null,
+      rate: null,
+      error: `API-driven search currently supports code, repositories, issues, pull requests, and users. "${unsupportedType}" can be added with a dedicated renderer.`,
+    }), 400, origin);
+  }
+
+  const apiUrl = buildSearchApiUrl(params);
+  const headers = buildSearchApiHeaders(env);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch(apiUrl.toString(), {
+      method: 'GET',
+      headers,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const rate = readSearchRateLimit(resp.headers);
+
+    let data = null;
+    let error = null;
+    try {
+      data = await resp.json();
+    } catch (_) {
+      error = `GitHub returned ${resp.status}.`;
+    }
+
+    if (!resp.ok) {
+      error = data?.message || error || `GitHub returned ${resp.status}.`;
+    }
+
+    return htmlResponse(buildSearchHtml({ ...params, result: data, error, rate }), resp.ok ? 200 : resp.status, origin);
+  } catch (err) {
+    clearTimeout(timeoutId);
+    const error = err.name === 'AbortError' ? 'GitHub Search API timed out.' : 'GitHub Search API request failed.';
+    return htmlResponse(buildSearchHtml({ ...params, result: null, error, rate: null }), err.name === 'AbortError' ? 504 : 502, origin);
+  }
+}
+
+function buildSearchHtml({ q, type, config, page, sort, order, result, error, rate }) {
+  const searchConfig = config || getSearchConfig(type) || SEARCH_TYPES.repositories;
+  const items = Array.isArray(result?.items) ? result.items : [];
+  const total = Number(result?.total_count || 0);
+  const pageCount = Math.max(1, Math.min(Math.ceil(total / 10), 100));
+  const typeLabel = searchConfig.label;
+  const pluralTypeLabel = searchConfig.plural;
+  const title = q ? `${typeLabel} search results - ${q}` : `${typeLabel} search`;
+
+  const tabLink = (label, tabType) => {
+    const active = type === tabType;
+    const href = `/search${buildQueryString({ q, type: tabType })}`;
+    return `<a class="search-tab ${active ? 'active' : ''}" href="${escapeAttr(href)}">${escapeHtml(label)}</a>`;
+  };
+  const tabsHtml = Object.entries(SEARCH_TYPES)
+    .map(([tabType, tabConfig]) => tabLink(tabConfig.tab, tabType))
+    .join('');
+
+  const sortLink = (label, value) => {
+    const active = sort === value || (!sort && value === '');
+    const href = `/search${buildQueryString({ q, type, sort: value, order: value ? 'desc' : '', p: 1 })}`;
+    return `<a class="sort-link ${active ? 'active' : ''}" href="${escapeAttr(href)}">${escapeHtml(label)}</a>`;
+  };
+
+  const resultHtml = items.map(item => searchConfig.renderResult(item)).join('') || `
+    <div class="empty-state">
+      <h2>${q ? `No ${escapeHtml(pluralTypeLabel)} found` : `Search GitHub ${escapeHtml(pluralTypeLabel)}`}</h2>
+      <p>${q ? 'Try a different query or remove some filters.' : 'Enter a keyword, owner/repo, topic, or qualifier.'}</p>
+    </div>`;
+
+  const sortHtml = searchConfig.sorts.map(([label, value]) => sortLink(label, value)).join('');
+  const paginationHtml = buildSearchPagination(q, type, page, pageCount, sort, order);
+  const rateHtml = rate ? `<span>Search API: ${escapeHtml(rate.remaining)}/${escapeHtml(rate.limit)} remaining, used ${escapeHtml(rate.used)}</span>` : '';
+  const errorHtml = error ? `<div class="search-error">${escapeHtml(error)}</div>` : '';
+  const facetHtml = searchConfig.renderFacet
+    ? searchConfig.renderFacet(q, items)
+    : buildSearchScopeFacetHtml(searchConfig.scope);
+
+  return `<!DOCTYPE html>
+<html lang="en" data-color-mode="auto">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${escapeHtml(title)}</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --subtle: #f6f8fa;
+  --accent: #0969da;
+  --success: #1a7f37;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --subtle: #161b22;
+    --accent: #58a6ff;
+    --success: #3fb950;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--subtle);
+}
+.mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--bg);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+}
+.search-form {
+  flex: 1;
+  display: flex;
+  max-width: 780px;
+}
+.search-form input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px 0 0 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.search-form button {
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  background: var(--subtle);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: calc(100vh - 69px);
+}
+.sidebar {
+  border-right: 1px solid var(--border);
+  padding: 24px;
+}
+.content {
+  padding: 24px 32px 48px;
+  max-width: 1080px;
+}
+.filter-title {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+.search-tab, .facet-link, .sort-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--fg);
+}
+.search-tab.active, .sort-link.active {
+  background: var(--subtle);
+  font-weight: 600;
+}
+.facet-group {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.facet-heading {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.language-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #89e051;
+  flex: 0 0 auto;
+}
+.subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.count {
+  font-size: 16px;
+  font-weight: 600;
+}
+.rate {
+  color: var(--muted);
+  font-size: 12px;
+}
+.sorts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 16px;
+}
+.sort-link {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 20px 0;
+  border-top: 1px solid var(--border);
+}
+.result-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+}
+.description {
+  max-width: 760px;
+  margin: 0 0 10px;
+  color: var(--muted);
+}
+.meta, .topics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.topic {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-weight: 500;
+}
+.star-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle);
+  color: var(--fg);
+  font-size: 12px;
+}
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--success);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.state-badge.closed {
+  background: #8250df;
+}
+.repo-link {
+  color: var(--muted);
+  font-size: 12px;
+}
+.empty-state, .search-error {
+  border-top: 1px solid var(--border);
+  padding: 32px 0;
+}
+.search-error {
+  color: #b42318;
+  font-weight: 600;
+}
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 24px;
+}
+.pagination a, .pagination span {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+}
+.pagination .active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+@media (max-width: 800px) {
+  .topbar { align-items: stretch; flex-direction: column; padding: 12px; }
+  .layout { grid-template-columns: 1fr; }
+  .sidebar { border-right: 0; border-bottom: 1px solid var(--border); padding: 16px; }
+  .content { padding: 16px; }
+  .subhead, .result { display: block; }
+  .star-btn { margin-top: 12px; }
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="mark" href="https://${ENTRY_DOMAIN}/" aria-label="GitHub Proxy">GH</a>
+  <form class="search-form" action="/search" method="get">
+    <input name="q" value="${escapeAttr(q)}" placeholder="Search ${escapeAttr(pluralTypeLabel)}" autocomplete="off"/>
+    <input type="hidden" name="type" value="${escapeAttr(type)}"/>
+    <button type="submit">Search</button>
+  </form>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <h2 class="filter-title">Filter by</h2>
+    ${tabsHtml}
+    ${facetHtml}
+  </aside>
+  <main class="content">
+    <div class="subhead">
+      <div class="count">${q ? `${formatCompactNumber(total)} ${escapeHtml(typeLabel)} results` : `${escapeHtml(typeLabel)} search`}</div>
+      <div class="rate">${rateHtml}</div>
+    </div>
+    <div class="sorts">
+      ${sortHtml}
+    </div>
+    ${errorHtml}
+    ${resultHtml}
+    ${paginationHtml}
+  </main>
+</div>
+</body>
+</html>`;
+}
+
+function buildRepositoryResultHtml(item) {
+  const fullName = item.full_name || `${item.owner?.login || ''}/${item.name || ''}`;
+  const href = `/${fullName}`;
+  const avatar = rewriteOriginalUrlToProxy(item.owner?.avatar_url || '');
+  const topics = Array.isArray(item.topics) ? item.topics.slice(0, 5) : [];
+  const description = item.description || '';
+
+  return `<article class="result">
+    <div>
+      <div class="result-title">
+        ${avatar ? `<img class="avatar" src="${escapeAttr(avatar)}" alt=""/>` : ''}
+        <a href="${escapeAttr(href)}">${escapeHtml(fullName)}</a>
+      </div>
+      ${description ? `<p class="description">${escapeHtml(description)}</p>` : ''}
+      ${topics.length ? `<div class="topics">${topics.map(topic => `<a class="topic" href="/search${buildQueryString({ q: `topic:${topic}`, type: 'repositories' })}">${escapeHtml(topic)}</a>`).join('')}</div>` : ''}
+      <div class="meta">
+        ${item.language ? `<span><span class="language-dot"></span> ${escapeHtml(item.language)}</span>` : ''}
+        <span>Star ${formatCompactNumber(item.stargazers_count)}</span>
+        <span>Fork ${formatCompactNumber(item.forks_count)}</span>
+        ${item.updated_at ? `<span>Updated ${escapeHtml(formatDate(item.updated_at))}</span>` : ''}
+      </div>
+    </div>
+    <div>
+      <a class="star-btn" href="${escapeAttr(href)}/stargazers">Star ${formatCompactNumber(item.stargazers_count)}</a>
+    </div>
+  </article>`;
+}
+
+function buildRepositorySearchFacetHtml(q, items) {
+  const languages = Array.from(new Map(items
+    .filter(item => item.language)
+    .map(item => [item.language, item.language])).values()).slice(0, 10);
+  const languageHtml = languages.map(lang => {
+    const query = `${q} language:${lang}`.trim();
+    return `<a class="facet-link" href="/search${buildQueryString({ q: query, type: 'repositories' })}"><span class="language-dot"></span>${escapeHtml(lang)}</a>`;
+  }).join('') || '<span class="muted small">No language facets on this page.</span>';
+
+  return `
+    <div class="facet-group">
+      <h3 class="facet-heading">Languages</h3>
+      ${languageHtml}
+    </div>`;
+}
+
+function buildSearchScopeFacetHtml(scope) {
+  if (!scope) return '';
+  return `
+    <div class="facet-group">
+      <h3 class="facet-heading">Search scope</h3>
+      <span class="muted small">${escapeHtml(scope)}</span>
+    </div>`;
+}
+
+function buildCodeResultHtml(item) {
+  const filePath = item.path || item.name || '(file)';
+  const fileHref = getGitHubWebPathFromUrl(item.html_url || '');
+  const repoFullName = item.repository?.full_name || '';
+  const repoPath = repoFullName ? `/${repoFullName}` : getGitHubWebPathFromUrl(item.repository?.html_url || '');
+  const repoDisplay = repoFullName || repoPath.replace(/^\//, '');
+
+  return `<article class="result">
+    <div>
+      <div class="result-title">
+        <a href="${escapeAttr(fileHref || '#')}">${escapeHtml(filePath)}</a>
+      </div>
+      ${repoDisplay ? `<a class="repo-link" href="${escapeAttr(repoPath || '#')}">${escapeHtml(repoDisplay)}</a>` : ''}
+      <div class="meta">
+        ${item.name ? `<span>${escapeHtml(item.name)}</span>` : ''}
+        ${item.score ? `<span>Score ${escapeHtml(Number(item.score).toFixed(2))}</span>` : ''}
+      </div>
+    </div>
+    <div>
+      <a class="star-btn" href="${escapeAttr(fileHref || '#')}">Open</a>
+    </div>
+  </article>`;
+}
+
+function buildIssueResultHtml(item) {
+  const issuePath = getGitHubWebPathFromUrl(item.html_url || '');
+  const repoPath = getRepositoryPathFromApiUrl(item.repository_url || '');
+  const repoName = repoPath.replace(/^\//, '');
+  const user = item.user?.login || '';
+  const state = item.state || 'open';
+  const title = item.title || '(untitled)';
+  const body = String(item.body || '').replace(/\s+/g, ' ').trim();
+  const summary = body.length > 240 ? `${body.slice(0, 237)}...` : body;
+  const number = item.number ? `#${item.number}` : '';
+
+  return `<article class="result">
+    <div>
+      <div class="result-title">
+        <span class="state-badge ${state === 'closed' ? 'closed' : ''}">${escapeHtml(state)}</span>
+        <a href="${escapeAttr(issuePath || '#')}">${escapeHtml(title)}</a>
+      </div>
+      ${repoName ? `<a class="repo-link" href="${escapeAttr(repoPath)}">${escapeHtml(repoName)}</a>` : ''}
+      ${summary ? `<p class="description">${escapeHtml(summary)}</p>` : ''}
+      <div class="meta">
+        ${number ? `<span>${escapeHtml(number)}</span>` : ''}
+        ${user ? `<span>opened by ${escapeHtml(user)}</span>` : ''}
+        <span>${formatCompactNumber(item.comments)} comments</span>
+        ${item.updated_at ? `<span>Updated ${escapeHtml(formatDate(item.updated_at))}</span>` : ''}
+      </div>
+    </div>
+    <div>
+      <a class="star-btn" href="${escapeAttr(issuePath || '#')}">Open</a>
+    </div>
+  </article>`;
+}
+
+function buildUserResultHtml(item) {
+  const login = item.login || '(user)';
+  const href = getGitHubWebPathFromUrl(item.html_url || `https://github.com/${login}`);
+  const avatar = rewriteOriginalUrlToProxy(item.avatar_url || '');
+  const type = item.type || 'User';
+
+  return `<article class="result">
+    <div>
+      <div class="result-title">
+        ${avatar ? `<img class="avatar" src="${escapeAttr(avatar)}" alt=""/>` : ''}
+        <a href="${escapeAttr(href || '#')}">${escapeHtml(login)}</a>
+      </div>
+      <div class="meta">
+        <span>${escapeHtml(type)}</span>
+        ${item.score ? `<span>Score ${escapeHtml(Number(item.score).toFixed(2))}</span>` : ''}
+      </div>
+    </div>
+    <div>
+      <a class="star-btn" href="${escapeAttr(href || '#')}">Open</a>
+    </div>
+  </article>`;
+}
+
+function getGitHubWebPathFromUrl(value) {
+  if (!value) return '';
+  try {
+    const u = new URL(value);
+    if (stripPort(u.hostname) === 'github.com') {
+      return `${u.pathname}${u.search}`;
+    }
+  } catch (_) {}
+  return rewriteOriginalUrlToProxy(value);
+}
+
+function getRepositoryPathFromApiUrl(value) {
+  if (!value) return '';
+  try {
+    const u = new URL(value);
+    if (stripPort(u.hostname) !== 'api.github.com') return getGitHubWebPathFromUrl(value);
+    const match = u.pathname.match(/^\/repos\/([^/]+)\/([^/]+)$/);
+    if (!match) return '';
+    return `/${match[1]}/${match[2]}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function buildSearchPagination(q, type, page, pageCount, sort, order) {
+  if (!q || pageCount <= 1) return '';
+  const links = [];
+  const addPage = (p, label = String(p)) => {
+    const href = `/search${buildQueryString({ q, type, sort, order: sort ? order : '', p })}`;
+    links.push(p === page ? `<span class="active">${escapeHtml(label)}</span>` : `<a href="${escapeAttr(href)}">${escapeHtml(label)}</a>`);
+  };
+
+  if (page > 1) addPage(page - 1, 'Previous');
+  for (let p = Math.max(1, page - 2); p <= Math.min(pageCount, page + 2); p++) addPage(p);
+  if (page < pageCount) addPage(page + 1, 'Next');
+
+  return `<nav class="pagination" aria-label="Pagination">${links.join('')}</nav>`;
+}
+
+function parseCommitsPageRequest(pathname, searchParams) {
+  const decodedPath = safeDecodeURI(pathname);
+  const match = decodedPath.match(/^\/([^/]+)\/([^/]+)\/commits(?:\/(.+))?\/?$/i);
+  if (!match) return null;
+
+  const owner = match[1];
+  const repo = match[2];
+  const refFromPath = (match[3] || '').replace(/\/$/, '');
+  const ref = (searchParams.get('sha') || refFromPath || '').trim();
+  const pageValue = searchParams.get('p') || searchParams.get('page');
+  const page = Math.max(1, Math.min(Number.parseInt(pageValue || '', 10) || (searchParams.has('after') ? 2 : 1), 100));
+
+  return {
+    owner,
+    repo,
+    ref,
+    page,
+    author: (searchParams.get('author') || '').trim().slice(0, 128),
+    since: (searchParams.get('since') || '').trim().slice(0, 64),
+    until: (searchParams.get('until') || '').trim().slice(0, 64),
+    path: (searchParams.get('path') || searchParams.get('newPath') || '').trim().slice(0, 512),
+  };
+}
+
+function buildGitHubApiHeaders(env, userAgent = 'gh-proxy-api-ui') {
+  const headers = new Headers({
+    'accept': 'application/vnd.github+json',
+    'user-agent': userAgent,
+    'x-github-api-version': '2022-11-28',
+  });
+  const token = getGitHubToken(env);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return headers;
+}
+
+async function fetchGitHubJson(apiUrl, env, userAgent) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch(apiUrl.toString(), {
+      method: 'GET',
+      headers: buildGitHubApiHeaders(env, userAgent),
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    let data = null;
+    let error = null;
+    try {
+      data = await resp.json();
+    } catch (_) {
+      error = `GitHub returned ${resp.status}.`;
+    }
+
+    if (!resp.ok) {
+      error = data?.message || error || `GitHub returned ${resp.status}.`;
+    }
+
+    return {
+      ok: resp.ok,
+      status: resp.status,
+      data,
+      error,
+      headers: resp.headers,
+      rate: readSearchRateLimit(resp.headers),
+    };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    return {
+      ok: false,
+      status: err.name === 'AbortError' ? 504 : 502,
+      data: null,
+      error: err.name === 'AbortError' ? 'GitHub Commits API timed out.' : 'GitHub Commits API request failed.',
+      headers: new Headers(),
+      rate: null,
+    };
+  }
+}
+
+async function handleCommitsRequest(requestInfo, origin, env) {
+  const repoApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}`);
+  const repoResult = await fetchGitHubJson(repoApiUrl, env, 'gh-proxy-commits-ui');
+
+  if (repoResult.ok && repoResult.data?.private) {
+    return htmlResponse(buildNotFoundHtml(), 404, origin);
+  }
+
+  const repo = repoResult.ok ? repoResult.data : null;
+  const ref = requestInfo.ref || repo?.default_branch || '';
+  const perPage = 35;
+  let commitsResult = null;
+
+  if (repoResult.ok) {
+    const commitsApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}/commits`);
+    commitsApiUrl.searchParams.set('per_page', String(perPage));
+    commitsApiUrl.searchParams.set('page', String(requestInfo.page));
+    if (ref) commitsApiUrl.searchParams.set('sha', ref);
+    if (requestInfo.author) commitsApiUrl.searchParams.set('author', requestInfo.author);
+    if (requestInfo.since) commitsApiUrl.searchParams.set('since', requestInfo.since);
+    if (requestInfo.until) commitsApiUrl.searchParams.set('until', requestInfo.until);
+    if (requestInfo.path) commitsApiUrl.searchParams.set('path', requestInfo.path);
+
+    commitsResult = await fetchGitHubJson(commitsApiUrl, env, 'gh-proxy-commits-ui');
+  }
+
+  const status = repoResult.ok ? (commitsResult?.ok ? 200 : commitsResult?.status || 502) : repoResult.status;
+  return htmlResponse(buildCommitsHtml({
+    requestInfo,
+    repo,
+    ref,
+    commits: Array.isArray(commitsResult?.data) ? commitsResult.data : [],
+    error: repoResult.error || commitsResult?.error || null,
+    rate: commitsResult?.rate || repoResult.rate,
+    pagination: parseGitHubPagination(commitsResult?.headers?.get('link') || ''),
+  }), status, origin);
+}
+
+function parseGitHubPagination(linkHeader) {
+  const out = { next: false, prev: false };
+  if (!linkHeader) return out;
+
+  for (const part of linkHeader.split(',')) {
+    const relMatch = part.match(/rel="([^"]+)"/);
+    if (!relMatch) continue;
+    if (relMatch[1] === 'next') out.next = true;
+    if (relMatch[1] === 'prev') out.prev = true;
+  }
+
+  return out;
+}
+
+function buildCommitsBasePath(owner, repo, ref) {
+  const encodedRef = String(ref || '').split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  return `/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits${encodedRef ? `/${encodedRef}` : ''}`;
+}
+
+function buildCommitsQuery(requestInfo, overrides = {}) {
+  return buildQueryString({
+    author: requestInfo.author,
+    since: requestInfo.since,
+    until: requestInfo.until,
+    path: requestInfo.path,
+    p: requestInfo.page,
+    ...overrides,
+  });
+}
+
+function groupCommitsByDate(commits) {
+  const groups = new Map();
+  for (const item of commits) {
+    const date = item.commit?.committer?.date || item.commit?.author?.date || item.committer?.date || item.author?.date;
+    const title = formatDate(date) || 'Unknown date';
+    if (!groups.has(title)) groups.set(title, []);
+    groups.get(title).push(item);
+  }
+  return Array.from(groups, ([title, items]) => ({ title, items }));
+}
+
+function splitCommitMessage(message) {
+  const lines = String(message || '').split(/\r?\n/);
+  const subject = lines[0] || '(no commit message)';
+  const body = lines.slice(1).join('\n').trim();
+  return { subject, body };
+}
+
+function buildCommitAuthorHtml(item, owner, repo, ref) {
+  const apiUser = item.author || item.committer;
+  const commitAuthor = item.commit?.author || item.commit?.committer || {};
+  const login = apiUser?.login || '';
+  const display = login || commitAuthor.name || 'Unknown author';
+  const avatar = rewriteOriginalUrlToProxy(apiUser?.avatar_url || '');
+  const authorHref = login ? `/${login}` : '';
+  const filterHref = login
+    ? `${buildCommitsBasePath(owner, repo, ref)}${buildQueryString({ author: login })}`
+    : '';
+
+  return `<span class="commit-author">
+    ${avatar ? `<a href="${escapeAttr(authorHref || '#')}"><img class="avatar" src="${escapeAttr(avatar)}" alt="${escapeAttr(display)}"/></a>` : '<span class="avatar avatar-fallback"></span>'}
+    ${filterHref ? `<a class="muted-link" href="${escapeAttr(filterHref)}">${escapeHtml(display)}</a>` : `<span>${escapeHtml(display)}</span>`}
+  </span>`;
+}
+
+function buildCommitRowHtml(item, owner, repo, ref) {
+  const sha = item.sha || '';
+  const shortSha = sha.slice(0, 7);
+  const message = splitCommitMessage(item.commit?.message || '');
+  const commitPath = `/${owner}/${repo}/commit/${sha}`;
+  const treePath = `/${owner}/${repo}/tree/${sha}`;
+  const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
+  const bodyHtml = message.body ? `<pre class="commit-body">${escapeHtml(message.body)}</pre>` : '';
+
+  return `<li class="commit-row">
+    <div class="commit-main">
+      <a class="commit-title" href="${escapeAttr(commitPath)}">${escapeHtml(message.subject)}</a>
+      ${bodyHtml}
+      <div class="commit-meta">
+        ${buildCommitAuthorHtml(item, owner, repo, ref)}
+        <span>committed</span>
+        ${commitDate ? `<time datetime="${escapeAttr(commitDate)}">${escapeHtml(formatDate(commitDate))}</time>` : ''}
+      </div>
+    </div>
+    <div class="commit-actions">
+      <a class="sha-link" href="${escapeAttr(commitPath)}">${escapeHtml(shortSha)}</a>
+      <button class="icon-btn copy-sha" type="button" data-sha="${escapeAttr(sha)}" aria-label="Copy full SHA for ${escapeAttr(shortSha)}">Copy</button>
+      <a class="icon-btn" href="${escapeAttr(treePath)}" aria-label="Browse repository at ${escapeAttr(shortSha)}">Code</a>
+    </div>
+  </li>`;
+}
+
+function buildCommitsHtml({ requestInfo, repo, ref, commits, error, rate, pagination }) {
+  const owner = requestInfo.owner;
+  const repoName = requestInfo.repo;
+  const repoFullName = repo?.full_name || `${owner}/${repoName}`;
+  const groups = groupCommitsByDate(commits);
+  const basePath = buildCommitsBasePath(owner, repoName, ref);
+  const resetHref = basePath;
+  const nextHref = `${basePath}${buildCommitsQuery(requestInfo, { p: requestInfo.page + 1 })}`;
+  const prevHref = `${basePath}${buildCommitsQuery(requestInfo, { p: Math.max(1, requestInfo.page - 1) })}`;
+  const currentPath = requestInfo.path || '';
+  const title = `Commits - ${repoFullName}`;
+  const rateHtml = rate?.limit ? `<span>API: ${escapeHtml(rate.remaining)}/${escapeHtml(rate.limit)} remaining</span>` : '';
+  const errorHtml = error ? `<div class="commits-error">${escapeHtml(error)}</div>` : '';
+  const groupHtml = groups.map(group => `
+    <section class="commit-group">
+      <div class="timeline-dot" aria-hidden="true"></div>
+      <h2>Commits on ${escapeHtml(group.title)}</h2>
+      <ul class="commit-list">
+        ${group.items.map(item => buildCommitRowHtml(item, owner, repoName, ref)).join('')}
+      </ul>
+    </section>`).join('') || `
+    <div class="empty-state">
+      <h2>No commits found</h2>
+      <p>Try another branch, author, date range, or path.</p>
+    </div>`;
+
+  return `<!DOCTYPE html>
+<html lang="en" data-color-mode="auto">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${escapeHtml(title)}</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --subtle: #f6f8fa;
+  --accent: #0969da;
+  --success: #1f883d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --subtle: #161b22;
+    --accent: #58a6ff;
+    --success: #3fb950;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--subtle);
+}
+.mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--bg);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+}
+.repo-name {
+  min-width: 0;
+  font-size: 16px;
+}
+.repo-name span { color: var(--muted); }
+.nav {
+  display: flex;
+  gap: 8px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+}
+.nav a {
+  padding: 12px 4px 10px;
+  color: var(--fg);
+  border-bottom: 2px solid transparent;
+}
+.nav a.active {
+  font-weight: 600;
+  border-bottom-color: #fd8c73;
+}
+.container {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 24px;
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 400;
+}
+.rate {
+  color: var(--muted);
+  font-size: 12px;
+}
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 22px;
+}
+.field {
+  display: grid;
+  gap: 4px;
+}
+.field label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.field input {
+  min-width: 150px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.field.ref input { min-width: 190px; }
+.btn, .link-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.timeline {
+  position: relative;
+  margin-left: 16px;
+}
+.timeline::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 8px;
+  width: 2px;
+  background: var(--border);
+}
+.commit-group {
+  position: relative;
+  padding-left: 36px;
+  margin-bottom: 26px;
+}
+.timeline-dot {
+  position: absolute;
+  left: 0;
+  top: 3px;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg);
+}
+.commit-group h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 500;
+}
+.commit-list {
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  list-style: none;
+  overflow: hidden;
+}
+.commit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+.commit-row:first-child { border-top: 0; }
+.commit-title {
+  display: inline-block;
+  max-width: 100%;
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.commit-body {
+  max-width: 780px;
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--subtle);
+  color: var(--muted);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+}
+.commit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.commit-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.avatar-fallback {
+  display: inline-block;
+  background: var(--border);
+}
+.muted-link { color: var(--muted); }
+.commit-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sha-link, .icon-btn {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle);
+  color: var(--fg);
+  font-size: 12px;
+}
+button.icon-btn { cursor: pointer; }
+.commits-error, .empty-state {
+  margin: 20px 0;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle);
+}
+.commits-error { color: #b42318; font-weight: 600; }
+.empty-state h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+.empty-state p {
+  margin: 0;
+  color: var(--muted);
+}
+.pagination {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 24px 0 4px;
+}
+.pagination a, .pagination span {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+}
+.pagination .disabled {
+  color: var(--muted);
+  opacity: .7;
+}
+@media (max-width: 760px) {
+  .topbar, .page-head { align-items: flex-start; flex-direction: column; }
+  .container { padding: 16px; }
+  .timeline { margin-left: 0; }
+  .commit-row { display: block; }
+  .commit-actions { margin-top: 10px; }
+  .field, .field input { width: 100%; }
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="mark" href="https://${ENTRY_DOMAIN}/" aria-label="GitHub Proxy">GH</a>
+  <div class="repo-name"><a href="/${escapeAttr(owner)}">${escapeHtml(owner)}</a><span> / </span><a href="/${escapeAttr(owner)}/${escapeAttr(repoName)}">${escapeHtml(repoName)}</a></div>
+</header>
+<nav class="nav" aria-label="Repository">
+  <a href="/${escapeAttr(owner)}/${escapeAttr(repoName)}">Code</a>
+  <a class="active" href="${escapeAttr(basePath)}">Commits</a>
+  <a href="/${escapeAttr(owner)}/${escapeAttr(repoName)}/branches">Branches</a>
+  <a href="/${escapeAttr(owner)}/${escapeAttr(repoName)}/tags">Tags</a>
+</nav>
+<main class="container">
+  <div class="page-head">
+    <h1>Commits</h1>
+    <div class="rate">${rateHtml}</div>
+  </div>
+  <form class="filters" method="get" action="${escapeAttr(basePath)}">
+    <div class="field ref">
+      <label for="ref-input">Branch or SHA</label>
+      <input id="ref-input" name="sha" value="${escapeAttr(ref)}" autocomplete="off"/>
+    </div>
+    <div class="field">
+      <label for="author-input">Author</label>
+      <input id="author-input" name="author" value="${escapeAttr(requestInfo.author)}" autocomplete="off"/>
+    </div>
+    <div class="field">
+      <label for="since-input">Since</label>
+      <input id="since-input" name="since" type="date" value="${escapeAttr(requestInfo.since.slice(0, 10))}"/>
+    </div>
+    <div class="field">
+      <label for="until-input">Until</label>
+      <input id="until-input" name="until" type="date" value="${escapeAttr(requestInfo.until.slice(0, 10))}"/>
+    </div>
+    <div class="field">
+      <label for="path-input">Path</label>
+      <input id="path-input" name="path" value="${escapeAttr(currentPath)}" autocomplete="off"/>
+    </div>
+    <button class="btn" type="submit">Filter</button>
+    <a class="link-btn" href="${escapeAttr(resetHref)}">Reset</a>
+  </form>
+  ${errorHtml}
+  <div class="timeline">
+    ${groupHtml}
+  </div>
+  <nav class="pagination" aria-label="Pagination">
+    ${requestInfo.page > 1 && pagination.prev ? `<a href="${escapeAttr(prevHref)}">Previous</a>` : '<span class="disabled">Previous</span>'}
+    <span>Page ${escapeHtml(requestInfo.page)}</span>
+    ${pagination.next ? `<a href="${escapeAttr(nextHref)}">Next</a>` : '<span class="disabled">Next</span>'}
+  </nav>
+</main>
+<script>
+document.addEventListener('click', function (event) {
+  const button = event.target.closest('.copy-sha');
+  if (!button) return;
+  const sha = button.getAttribute('data-sha') || '';
+  if (!sha) return;
+  Promise.resolve(navigator.clipboard && navigator.clipboard.writeText(sha)).then(function () {
+    const oldText = button.textContent;
+    button.textContent = 'Copied';
+    setTimeout(function () { button.textContent = oldText; }, 1200);
+  }).catch(function () {});
+});
 </script>
 </body>
 </html>`;
@@ -1363,15 +2723,18 @@ async function handleRequest(request, env) {
   }
 
   if (effectiveHost === ENTRY_DOMAIN) {
-    return handleEntryRequest(url, origin);
+    return handleEntryRequest(url, origin, env);
   }
 
   return handleProxyRequest(request, url, origin, effectiveHost, env);
 }
 
-function handleEntryRequest(url, origin) {
+async function handleEntryRequest(url, origin, env) {
   if (url.pathname === '/') {
     return htmlResponse(buildHomeHtml(), 200, origin);
+  }
+  if (url.pathname === '/search') {
+    return handleSearchRequest(url, origin, env);
   }
   if (['/favicon.ico', '/robots.txt'].includes(url.pathname)) {
     return new Response(null, { status: 404 });
@@ -1381,14 +2744,14 @@ function handleEntryRequest(url, origin) {
 
   const decodedPath = safeDecodeURI(url.pathname);
   if (
-    githubRedirectPatterns.some(re => re.test(url.pathname)) ||
-    githubRedirectPatterns.some(re => re.test(decodedPath))
+    shouldBlockGithubWebPath('github.com', url.pathname) ||
+    shouldBlockGithubWebPath('github.com', decodedPath)
   ) {
     return NOT_FOUND();
   }
   if (ENABLE_STRICT_DEFENSE && (
-    extraDefensePatterns.some(re => re.test(url.pathname)) ||
-    extraDefensePatterns.some(re => re.test(decodedPath))
+    shouldBlockStrictDefensePath('github.com', url.pathname) ||
+    shouldBlockStrictDefensePath('github.com', decodedPath)
   )) {
     return NOT_FOUND();
   }
@@ -1438,6 +2801,13 @@ async function handleProxyRequest(request, url, origin, effectiveHost, env) {
     return Response.redirect(`https://${ENTRY_DOMAIN}/`, 302);
   }
 
+  if (currentOrigin === 'github.com' && canonicalPath === '/search' && request.method === 'GET') {
+    const searchUrl = new URL(url);
+    searchUrl.pathname = '/search';
+    searchUrl.search = mergedSearch;
+    return handleSearchRequest(searchUrl, origin, env);
+  }
+
   // 对路径做解码和规范化后再进行敏感路径检测。
   const decodedPath = safeDecodeURI(canonicalPath);
   if (
@@ -1447,8 +2817,8 @@ async function handleProxyRequest(request, url, origin, effectiveHost, env) {
     return NOT_FOUND();
   }
   if (ENABLE_STRICT_DEFENSE && (
-    extraDefensePatterns.some(re => re.test(canonicalPath)) ||
-    extraDefensePatterns.some(re => re.test(decodedPath))
+    shouldBlockStrictDefensePath(currentOrigin, canonicalPath) ||
+    shouldBlockStrictDefensePath(currentOrigin, decodedPath)
   )) {
     return NOT_FOUND();
   }
