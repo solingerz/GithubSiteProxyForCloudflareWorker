@@ -6,7 +6,6 @@ const PROXY_LABEL_SUFFIX = '-gh';
 
 const ENABLE_GEO_REDIRECT = true;
 const ALLOWED_COUNTRIES = ['CN'];
-const ENABLE_STRICT_DEFENSE = true;
 
 const SENSITIVE_QUERY_PARAMS = ['return_to', 'redirect_to', 'next', 'continue', 'destination'];
 const SENSITIVE_URL_PARAMS = ['access_token', 'token'];
@@ -243,58 +242,6 @@ const githubRedirectPatterns = [
 
 ];
 
-const extraDefensePatterns = [
-  // WordPress
-  /^\/wp-(?:admin|login|signup|register|cron|comments-post|links-opml|json|config|content|includes)/i,
-  /^\/xmlrpc\.php$/i,
-
-  // Joomla / Drupal
-  /^\/administrator(?:\/|$)/i,
-  /^\/joomla(\/|$)/i,
-  /^\/user(?:\/(?:login|register|password))?(\/|$)/i,
-  /^\/(?:core\/install|update)\.php$/i,
-  /^\/sites\/default\//i,
-
-  // 通用后台
-  /^\/(?:index\.php\/)?admin(?:\/|$)/i,
-  /^\/(?:admincp|admin-panel|backend|manage|manager|cms|console|controlpanel|webadmin|cpanel)(\/|$)/i,
-  /^\/(?:login|admin)\.php$/i,
-
-  // 数据库
-  /^\/(?:phpmyadmin|phpMyAdmin|pma|mysql|sql|dbadmin|myadmin)(\/|$)/i,
-
-  // 探测文件
-  /^\/(?:phpinfo|info|test|phpmyinfo|phptest)\.php$/i,
-  /^\/(?:config|database|db)\.php/i,
-  /^\/(?:backup|dump|shell|wshell)\.php$/i,
-  /^\/[a-z0-9_\-]*shell\.php$/i,
-  /^\/\.env/i,
-
-  // 框架
-  /^\/(?:laravel|thinkphp|vendor|_debugbar)(\/|$)/i,
-  /^\/storage(?:\/logs)?(\/|$)/i,
-  /^\/bootstrap\/cache\//i,
-  /^\/(?:actuator|jolokia|druid|hydra|jmx-console|admin-console)(\/|$)/i,
-
-  // DevOps
-  /^\/(?:jenkins|hudson|gitlab|kibana|grafana|nagios|zabbix)(\/|$)/i,
-
-  // 版本控制
-  /^\/\.(?:git|svn|hg|idea|vscode)(?:\/|$)/i,
-  /^\/(?:composer\.(?:json|lock)|package\.json|yarn\.lock)$/i,
-
-  // 备份文件
-  /^\/(?:backup|backups?|dump|dumps?|db(?:backup|dump)?)(\/|$)/i,
-  /^\/[^\/]+\.(?:sql|sqlite|db|dump|gz|zip|7z|rar|tar(?:\.gz)?|bak|old|swp)$/i,
-
-  // 服务器状态
-  /^\/server-(?:status|info)(\/|$)/i,
-  /^\/(?:_cluster\/health|elasticsearch)(\/|$)/i,
-  /^\/(?:owa|ecp|Autodiscover|remote|vpn)(\/|$)/i,
-  /^\/cgi-bin(?:\/.+)?(\/|$)/i,
-
-];
-
 // ===================== CORS =====================
 function corsHeaders(origin) {
   const h = {
@@ -351,6 +298,15 @@ function htmlResponse(html, status, origin) {
   const headers = new Headers({ 'content-type': 'text/html; charset=utf-8' });
   applyCorsHeaders(headers, origin);
   return new Response(html, {
+    status,
+    headers,
+  });
+}
+
+function jsonResponse(payload, status, origin) {
+  const headers = new Headers({ 'content-type': 'application/json; charset=utf-8' });
+  applyCorsHeaders(headers, origin);
+  return new Response(JSON.stringify(payload), {
     status,
     headers,
   });
@@ -541,18 +497,20 @@ function buildSearchApiUrl({ q, config, page, sort, order }) {
   return apiUrl;
 }
 
-function buildSearchApiHeaders(env) {
+function buildGitHubApiHeaders(env, userAgent = 'gh-proxy-api-ui', apiUrl = null) {
   const headers = new Headers({
     'accept': 'application/vnd.github+json',
-    'user-agent': 'gh-proxy-search-ui',
+    'user-agent': userAgent,
     'x-github-api-version': '2022-11-28',
   });
   const token = getGitHubToken(env);
-  if (token) headers.set('Authorization', `Bearer ${token}`);
+  if (token && apiUrl && isGitHubTokenApiPath(apiUrl.pathname)) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
   return headers;
 }
 
-function readSearchRateLimit(headers) {
+function readGitHubRateLimit(headers) {
   return {
     limit: headers.get('x-ratelimit-limit') || '',
     remaining: headers.get('x-ratelimit-remaining') || '',
@@ -560,6 +518,54 @@ function readSearchRateLimit(headers) {
     reset: headers.get('x-ratelimit-reset') || '',
     resource: headers.get('x-ratelimit-resource') || '',
   };
+}
+
+async function fetchGitHubJson(apiUrl, env, options = {}) {
+  const { userAgent = 'gh-proxy-api-ui', failureLabel = 'GitHub API' } = options;
+  const url = apiUrl instanceof URL ? apiUrl : new URL(apiUrl);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch(url.toString(), {
+      method: 'GET',
+      headers: buildGitHubApiHeaders(env, userAgent, url),
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+
+    let data = null;
+    let error = null;
+    try {
+      data = await resp.json();
+    } catch (_) {
+      error = `GitHub returned ${resp.status}.`;
+    }
+
+    if (!resp.ok) {
+      error = data?.message || error || `GitHub returned ${resp.status}.`;
+    }
+
+    return {
+      ok: resp.ok,
+      status: resp.status,
+      data,
+      error,
+      headers: resp.headers,
+      rate: readGitHubRateLimit(resp.headers),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: err?.name === 'AbortError' ? 504 : 502,
+      data: null,
+      error: err?.name === 'AbortError' ? `${failureLabel} timed out.` : `${failureLabel} request failed.`,
+      headers: new Headers(),
+      rate: null,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ===================== 工具函数 =====================
@@ -671,50 +677,19 @@ function shouldBlockGithubWebPath(currentOrigin, pathname) {
   return githubRedirectPatterns.some(re => re.test(pathname));
 }
 
-function shouldBlockStrictDefensePath(currentOrigin, pathname) {
-  if (currentOrigin === 'api.github.com') return false;
-  return extraDefensePatterns.some(re => re.test(pathname));
-}
-
-function isGitHubTokenOrigin(origin) {
-  const host = stripPort(origin);
-  return (
-    host === 'github.com' ||
-    host.endsWith('.github.com') ||
-    host === 'githubusercontent.com' ||
-    host.endsWith('.githubusercontent.com') ||
-    host === 'github.githubassets.com' ||
-    host === 'assets-cdn.github.com'
-  );
-}
-
 function getGitHubToken(env) {
   const token = env?.[GITHUB_TOKEN_ENV];
   return typeof token === 'string' ? token.trim() : '';
 }
 
-function isSensitiveGitHubApiPath(pathname) {
+function isGitHubTokenApiPath(pathname) {
   const decodedPath = safeDecodeURI(pathname);
 
   return [
-    // Token / identity context.
-    /^\/(?:user|notifications|authorizations|applications|installation|installations|app)(?:\/|$)/i,
-
-    // Repository administration or security metadata.
-    /^\/repos\/[^/]+\/[^/]+\/(?:actions\/secrets|actions\/runners|collaborators|deployments|environments|hooks|keys|rules|rulesets|secret-scanning|code-scanning|dependabot|vulnerability-alerts|automated-security-fixes|traffic)(?:\/|$)/i,
-
-    // Organization administration metadata.
-    /^\/orgs\/[^/]+\/(?:credential-authorizations|personal-access-tokens|outside-collaborators|hooks|installations|actions\/secrets|actions\/runners|security-managers)(?:\/|$)/i,
-
-    // Enterprise and billing/admin surfaces should never use a shared proxy token.
-    /^\/(?:enterprises|organizations|billing|marketplace_listing)(?:\/|$)/i,
+    /^\/search\/(?:code|repositories|issues|users)$/i,
+    /^\/repos\/[^/]+\/[^/]+$/i,
+    /^\/repos\/[^/]+\/[^/]+\/(?:commits|branches|tags|contributors)$/i,
   ].some(re => re.test(decodedPath));
-}
-
-function isSensitiveGitHubTokenPath(currentOrigin, pathname) {
-  if (currentOrigin === 'api.github.com') return isSensitiveGitHubApiPath(pathname);
-  if (currentOrigin === 'github.com') return shouldBlockGithubWebPath(currentOrigin, pathname);
-  return false;
 }
 
 function isHtmlNavigationRequest(request) {
@@ -723,14 +698,9 @@ function isHtmlNavigationRequest(request) {
 }
 
 function shouldAttachGitHubToken(request, currentOrigin, pathname) {
-  if (!isGitHubTokenOrigin(currentOrigin)) return false;
+  if (currentOrigin !== 'api.github.com') return false;
   if (!GITHUB_TOKEN_METHODS.has(request.method)) return false;
-  if (isSensitiveGitHubTokenPath(currentOrigin, pathname)) return false;
-
-  // GitHub 主站 HTML 不使用服务端 token，避免返回 token 持有者上下文相关页面。
-  if (currentOrigin === 'github.com' && isHtmlNavigationRequest(request)) return false;
-
-  return true;
+  return isGitHubTokenApiPath(pathname);
 }
 
 function attachGitHubToken(headers, env, request, currentOrigin, pathname) {
@@ -798,24 +768,6 @@ function extractTargetFromPath(pathname) {
   return null;
 }
 
-// 修正 commit 信息接口中被拼接进 pathname 的完整 URL。
-function fixCommitInfoPath(pathname) {
-  const pattern = /(\/[^\/]+\/[^\/]+\/(?:latest-commit|tree-commit-info)\/[^\/]+)\/(https?(?:%3A|:)\/\/[^/]+\/[^/]+\/[^/]+\/.*)/i;
-  const match = pathname.match(pattern);
-  if (!match) return pathname;
-  const prefix = match[1];
-  const raw = match[2].includes('%3A') ? decodeURIComponent(match[2]) : match[2];
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(raw);
-  } catch (err) {
-    // 忽略无效格式导致的解析错误，避免在日志中产生过多噪音
-    return pathname;
-  }
-  const segments = parsedUrl.pathname.split('/').slice(3).join('/');
-  return segments ? `${prefix}/${segments}` : prefix;
-}
-
 // ===================== 地理重定向 =====================
 function tryGeoRedirect(request, currentOrigin, url) {
   if (!ENABLE_GEO_REDIRECT) return null;
@@ -862,24 +814,24 @@ async function modifyResponse(response) {
     } catch (_) {}
   }
 
-  const isJson = ct.includes('application/json');
+  return rewriteTextDomains(text, ct.includes('application/json'));
+}
 
+function rewriteTextDomains(text, isJson = false) {
   if (isJson) {
     // JSON 中仅替换带完整协议的 URL，降低误改 JSON 值的风险
-    text = text.replace(jsonSafeRe, (_match, domain) => {
+    return text.replace(jsonSafeRe, (_match, domain) => {
       const proxy = domain_mappings[domain];
       return proxy ? `https://${proxy}` : _match;
     });
-  } else {
-    // HTML / JS / XML / CSS：替换所有形式的域名引用
-    text = text.replace(mergedDomainRe, (_match, proto, domain) => {
-      const proxy = domain_mappings[domain];
-      if (!proxy) return _match;
-      return `${proto || ''}//${proxy}`;
-    });
   }
 
-  return text;
+  // HTML / JS / XML / CSS：替换所有形式的域名引用
+  return text.replace(mergedDomainRe, (_match, proto, domain) => {
+    const proxy = domain_mappings[domain];
+    if (!proxy) return _match;
+    return `${proto || ''}//${proxy}`;
+  });
 }
 
 async function readTextWithinLimit(response, maxBytes) {
@@ -1411,7 +1363,6 @@ ${COMMON_CSS}
 </div>
 
 <script>
-var DOMAIN_MAP = ${JSON.stringify(domain_mappings)};
 function go() {
   const inputEl = document.getElementById('u');
   if (!inputEl) return false;
@@ -1422,16 +1373,6 @@ function go() {
   const ghMatch = v.match(/^(?:https?:\\/\\/(?:www\\.)?)?github\\.com\\/(.+)/i);
   if (ghMatch) {
     v = ghMatch[1];
-  } else if (/^https?:\\/\\//i.test(v)) {
-    try {
-      const u = new URL(v);
-      const h = u.hostname.toLowerCase();
-      const proxy = DOMAIN_MAP[h] || DOMAIN_MAP[h.replace(/^www\\./, '')];
-      if (proxy) {
-        location.href = 'https://' + proxy + u.pathname + u.search;
-        return false;
-      }
-    } catch (_) {}
   }
 
   v = v.replace(/^\\/+/, '');
@@ -1473,40 +1414,21 @@ async function handleSearchRequest(url, origin, env) {
   }
 
   const apiUrl = buildSearchApiUrl(params);
-  const headers = buildSearchApiHeaders(env);
+  const result = await fetchGitHubJson(apiUrl, env, {
+    userAgent: 'gh-proxy-search-ui',
+    failureLabel: 'GitHub Search API',
+  });
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
-
-  try {
-    const resp = await fetch(apiUrl.toString(), {
-      method: 'GET',
-      headers,
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    const rate = readSearchRateLimit(resp.headers);
-
-    let data = null;
-    let error = null;
-    try {
-      data = await resp.json();
-    } catch (_) {
-      error = `GitHub returned ${resp.status}.`;
-    }
-
-    if (!resp.ok) {
-      error = data?.message || error || `GitHub returned ${resp.status}.`;
-    }
-
-    return htmlResponse(buildSearchHtml({ ...params, result: data, error, rate }), resp.ok ? 200 : resp.status, origin);
-  } catch (err) {
-    clearTimeout(timeoutId);
-    const error = err.name === 'AbortError' ? 'GitHub Search API timed out.' : 'GitHub Search API request failed.';
-    return htmlResponse(buildSearchHtml({ ...params, result: null, error, rate: null }), err.name === 'AbortError' ? 504 : 502, origin);
-  }
+  return htmlResponse(
+    buildSearchHtml({
+      ...params,
+      result: result.data,
+      error: result.error,
+      rate: result.rate,
+    }),
+    result.ok ? 200 : result.status,
+    origin
+  );
 }
 
 function buildSearchHtml({ q, type, config, page, sort, order, result, error, rate }) {
@@ -2033,66 +1955,13 @@ function parseCommitsPageRequest(pathname, searchParams) {
   };
 }
 
-function buildGitHubApiHeaders(env, userAgent = 'gh-proxy-api-ui') {
-  const headers = new Headers({
-    'accept': 'application/vnd.github+json',
-    'user-agent': userAgent,
-    'x-github-api-version': '2022-11-28',
-  });
-  const token = getGitHubToken(env);
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  return headers;
-}
-
-async function fetchGitHubJson(apiUrl, env, userAgent) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
-
-  try {
-    const resp = await fetch(apiUrl.toString(), {
-      method: 'GET',
-      headers: buildGitHubApiHeaders(env, userAgent),
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    let data = null;
-    let error = null;
-    try {
-      data = await resp.json();
-    } catch (_) {
-      error = `GitHub returned ${resp.status}.`;
-    }
-
-    if (!resp.ok) {
-      error = data?.message || error || `GitHub returned ${resp.status}.`;
-    }
-
-    return {
-      ok: resp.ok,
-      status: resp.status,
-      data,
-      error,
-      headers: resp.headers,
-      rate: readSearchRateLimit(resp.headers),
-    };
-  } catch (err) {
-    clearTimeout(timeoutId);
-    return {
-      ok: false,
-      status: err.name === 'AbortError' ? 504 : 502,
-      data: null,
-      error: err.name === 'AbortError' ? 'GitHub Commits API timed out.' : 'GitHub Commits API request failed.',
-      headers: new Headers(),
-      rate: null,
-    };
-  }
-}
-
 async function handleCommitsRequest(requestInfo, origin, env) {
   const repoApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}`);
-  const repoResult = await fetchGitHubJson(repoApiUrl, env, 'gh-proxy-commits-ui');
+  const apiOptions = {
+    userAgent: 'gh-proxy-commits-ui',
+    failureLabel: 'GitHub Commits API',
+  };
+  const repoResult = await fetchGitHubJson(repoApiUrl, env, apiOptions);
 
   if (repoResult.ok && repoResult.data?.private) {
     return htmlResponse(buildNotFoundHtml(), 404, origin);
@@ -2102,6 +1971,8 @@ async function handleCommitsRequest(requestInfo, origin, env) {
   const ref = requestInfo.ref || repo?.default_branch || '';
   const perPage = 35;
   let commitsResult = null;
+  let branchesResult = null;
+  let tagsResult = null;
 
   if (repoResult.ok) {
     const commitsApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}/commits`);
@@ -2113,19 +1984,65 @@ async function handleCommitsRequest(requestInfo, origin, env) {
     if (requestInfo.until) commitsApiUrl.searchParams.set('until', requestInfo.until);
     if (requestInfo.path) commitsApiUrl.searchParams.set('path', requestInfo.path);
 
-    commitsResult = await fetchGitHubJson(commitsApiUrl, env, 'gh-proxy-commits-ui');
+    const branchesApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}/branches`);
+    branchesApiUrl.searchParams.set('per_page', '50');
+
+    const tagsApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}/tags`);
+    tagsApiUrl.searchParams.set('per_page', '30');
+
+    [commitsResult, branchesResult, tagsResult] = await Promise.all([
+      fetchGitHubJson(commitsApiUrl, env, apiOptions),
+      fetchGitHubJson(branchesApiUrl, env, apiOptions),
+      fetchGitHubJson(tagsApiUrl, env, apiOptions),
+    ]);
   }
 
   const status = repoResult.ok ? (commitsResult?.ok ? 200 : commitsResult?.status || 502) : repoResult.status;
-  return htmlResponse(buildCommitsHtml({
+  const commits = Array.isArray(commitsResult?.data) ? commitsResult.data : [];
+  const payload = {
     requestInfo,
     repo,
     ref,
-    commits: Array.isArray(commitsResult?.data) ? commitsResult.data : [],
+    commits,
     error: repoResult.error || commitsResult?.error || null,
     rate: commitsResult?.rate || repoResult.rate,
     pagination: parseGitHubPagination(commitsResult?.headers?.get('link') || ''),
-  }), status, origin);
+    branches: Array.isArray(branchesResult?.data) ? branchesResult.data : [],
+    tags: Array.isArray(tagsResult?.data) ? tagsResult.data : [],
+    users: buildInitialCommitUserOptions(requestInfo.author),
+  };
+
+  return htmlResponse(buildCommitsHtml(payload), status, origin);
+}
+
+async function handleCommitUsersRequest(requestInfo, origin, env) {
+  const repoApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}`);
+  const apiOptions = {
+    userAgent: 'gh-proxy-commits-ui',
+    failureLabel: 'GitHub Commits API',
+  };
+  const repoResult = await fetchGitHubJson(repoApiUrl, env, apiOptions);
+  if (repoResult.ok && repoResult.data?.private) {
+    return jsonResponse({ error: 'Not found', itemsHtml: '' }, 404, origin);
+  }
+  if (!repoResult.ok) {
+    return jsonResponse({ error: repoResult.error || 'Unable to load repository.', itemsHtml: '' }, repoResult.status, origin);
+  }
+
+  const ref = requestInfo.ref || repoResult.data?.default_branch || '';
+  const contributorUsersResult = await fetchRepoContributorUsers(requestInfo.owner, requestInfo.repo, env, apiOptions);
+  if (!contributorUsersResult.ok) {
+    return jsonResponse({
+      error: contributorUsersResult.error || 'Unable to load contributors.',
+      itemsHtml: '',
+    }, contributorUsersResult.status || 502, origin);
+  }
+
+  const users = buildCommitUserOptions(requestInfo.author, contributorUsersResult.users || []);
+  return jsonResponse({
+    count: users.length,
+    itemsHtml: buildUserSelectorItemsHtml({ owner: requestInfo.owner, repo: requestInfo.repo, ref, requestInfo, users }),
+  }, 200, origin);
 }
 
 function parseGitHubPagination(linkHeader) {
@@ -2169,11 +2086,42 @@ function groupCommitsByDate(commits) {
   return Array.from(groups, ([title, items]) => ({ title, items }));
 }
 
-function splitCommitMessage(message) {
-  const lines = String(message || '').split(/\r?\n/);
-  const subject = lines[0] || '(no commit message)';
-  const body = lines.slice(1).join('\n').trim();
-  return { subject, body };
+function getCommitSubject(message) {
+  return String(message || '').split(/\r?\n/)[0] || '(no commit message)';
+}
+
+function buildCommitTitleHtml(subject, commitPath) {
+  const source = String(subject || '(no commit message)');
+  const href = escapeAttr(commitPath);
+
+  if (!source.includes('`')) {
+    return `<a class="commit-title" href="${href}">${escapeHtml(source)}</a>`;
+  }
+
+  let html = '';
+  let lastIndex = 0;
+  const codeRe = /`([^`]+)`/g;
+  let match;
+
+  while ((match = codeRe.exec(source)) !== null) {
+    const before = source.slice(lastIndex, match.index);
+    const codeText = match[1];
+
+    if (before) {
+      html += escapeHtml(before);
+    }
+
+    html += `<code>${escapeHtml(codeText)}</code>`;
+
+    lastIndex = codeRe.lastIndex;
+  }
+
+  const after = source.slice(lastIndex);
+  if (after) {
+    html += escapeHtml(after);
+  }
+
+  return `<a class="commit-title" href="${href}">${html || escapeHtml(source)}</a>`;
 }
 
 function buildCommitAuthorHtml(item, owner, repo, ref) {
@@ -2196,16 +2144,14 @@ function buildCommitAuthorHtml(item, owner, repo, ref) {
 function buildCommitRowHtml(item, owner, repo, ref) {
   const sha = item.sha || '';
   const shortSha = sha.slice(0, 7);
-  const message = splitCommitMessage(item.commit?.message || '');
+  const subject = getCommitSubject(item.commit?.message || '');
   const commitPath = `/${owner}/${repo}/commit/${sha}`;
   const treePath = `/${owner}/${repo}/tree/${sha}`;
   const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
-  const bodyHtml = message.body ? `<pre class="commit-body">${escapeHtml(message.body)}</pre>` : '';
 
   return `<li class="commit-row">
     <div class="commit-main">
-      <a class="commit-title" href="${escapeAttr(commitPath)}">${escapeHtml(message.subject)}</a>
-      ${bodyHtml}
+      <div class="commit-title-line">${buildCommitTitleHtml(subject, commitPath)}</div>
       <div class="commit-meta">
         ${buildCommitAuthorHtml(item, owner, repo, ref)}
         <span>committed</span>
@@ -2220,19 +2166,361 @@ function buildCommitRowHtml(item, owner, repo, ref) {
   </li>`;
 }
 
-function buildCommitsHtml({ requestInfo, repo, ref, commits, error, rate, pagination }) {
+function buildRefFilterHref(owner, repo, refName, requestInfo) {
+  return `${buildCommitsBasePath(owner, repo, refName)}${buildQueryString({
+    author: requestInfo.author,
+    since: requestInfo.since,
+    until: requestInfo.until,
+    path: requestInfo.path,
+  })}`;
+}
+
+function buildAuthorFilterHref(owner, repo, ref, requestInfo, author) {
+  return `${buildCommitsBasePath(owner, repo, ref)}${buildQueryString({
+    author,
+    since: requestInfo.since,
+    until: requestInfo.until,
+    path: requestInfo.path,
+  })}`;
+}
+
+function buildCommitUsersDataHref(owner, repo, ref, requestInfo) {
+  return `${buildCommitsBasePath(owner, repo, ref)}${buildQueryString({
+    author: requestInfo.author,
+    since: requestInfo.since,
+    until: requestInfo.until,
+    path: requestInfo.path,
+    commits_users: '1',
+  })}`;
+}
+
+function uniqueByName(items) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const name = item?.name || item?.login || '';
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(item);
+  }
+  return out;
+}
+
+function normalizeGitHubUser(user) {
+  const login = String(user?.login || '').trim();
+  if (!login) return null;
+  return {
+    login,
+    avatar_url: user?.avatar_url || '',
+  };
+}
+
+const CONTRIBUTOR_USER_PAGE_SIZE = 100;
+
+function buildRepoContributorsApiUrl(owner, repo, page) {
+  const apiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contributors`);
+  apiUrl.searchParams.set('per_page', String(CONTRIBUTOR_USER_PAGE_SIZE));
+  apiUrl.searchParams.set('page', String(page));
+  return apiUrl;
+}
+
+async function fetchRepoContributorUsers(owner, repo, env, apiOptions) {
+  const result = await fetchGitHubJson(buildRepoContributorsApiUrl(owner, repo, 1), env, {
+    ...apiOptions,
+    failureLabel: 'GitHub Contributors API',
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: result.status,
+      error: result.error,
+      users: [],
+    };
+  }
+
+  return {
+    ok: true,
+    status: result.status,
+    error: null,
+    users: uniqueByName((Array.isArray(result.data) ? result.data : []).map(normalizeGitHubUser).filter(Boolean)),
+  };
+}
+
+function buildCommitUserOptions(currentAuthor, contributorUsers = []) {
+  return uniqueByName([
+    ...(currentAuthor ? [{ login: currentAuthor }] : []),
+    ...contributorUsers,
+  ]);
+}
+
+function buildInitialCommitUserOptions(currentAuthor) {
+  return currentAuthor ? [{ login: currentAuthor, avatar_url: '' }] : [];
+}
+
+function buildRefMenuItemHtml({ name, href, selected, label }) {
+  return `<li role="none" class="prc-ActionList-ActionListItem-So4vC ref-menu-row" data-component="ActionList.Item" data-has-description="false" data-filter-value="${escapeAttr(String(name).toLowerCase())}">
+    <a role="menuitemradio" aria-checked="${selected ? 'true' : 'false'}" class="prc-ActionList-ActionListContent-KBb8- ref-menu-item" data-size="medium" href="${escapeAttr(href)}">
+      <span class="prc-ActionList-LeadingAction-hbWbh prc-ActionList-VisualWrap-bdCsS checkmark" aria-hidden="true">${selected ? CHECK_ICON : ''}</span>
+      <span class="prc-ActionList-ActionListSubContent-gKsFp ref-menu-subcontent">
+        <span class="prc-ActionList-ItemLabel-81ohH ref-name">${escapeHtml(name)}</span>
+        ${label ? `<span class="prc-Label-Label-qG-Zu ref-label" data-size="small" data-variant="default" data-component="Label">${escapeHtml(label)}</span>` : ''}
+      </span>
+    </a>
+  </li>`;
+}
+
+const GIT_BRANCH_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-git-branch" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"></path></svg>`;
+const PEOPLE_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-people fgColor-muted" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M2 5.5a3.5 3.5 0 1 1 5.898 2.549 5.508 5.508 0 0 1 3.034 4.084.75.75 0 1 1-1.482.235 4 4 0 0 0-7.9 0 .75.75 0 0 1-1.482-.236A5.507 5.507 0 0 1 3.102 8.05 3.493 3.493 0 0 1 2 5.5ZM11 4a3.001 3.001 0 0 1 2.22 5.018 5.01 5.01 0 0 1 2.56 3.012.749.749 0 0 1-.885.954.752.752 0 0 1-.549-.514 3.507 3.507 0 0 0-2.522-2.372.75.75 0 0 1-.574-.73v-.352a.75.75 0 0 1 .416-.672A1.5 1.5 0 0 0 11 5.5.75.75 0 0 1 11 4Zm-5.5-.5a2 2 0 1 0-.001 3.999A2 2 0 0 0 5.5 3.5Z"></path></svg>`;
+const CALENDAR_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-calendar fgColor-muted" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M4.75 0a.75.75 0 0 1 .75.75V2h5V.75a.75.75 0 0 1 1.5 0V2h1.25c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 13.25 16H2.75A1.75 1.75 0 0 1 1 14.25V3.75C1 2.784 1.784 2 2.75 2H4V.75A.75.75 0 0 1 4.75 0ZM2.5 7.5v6.75c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V7.5Zm10.75-4H2.75a.25.25 0 0 0-.25.25V6h11V3.75a.25.25 0 0 0-.25-.25Z"></path></svg>`;
+const TRIANGLE_DOWN_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-triangle-down" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="m4.427 7.427 3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z"></path></svg>`;
+const CHECK_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-check" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path></svg>`;
+const SEARCH_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-search" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path></svg>`;
+const X_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-x" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"></path></svg>`;
+
+function buildRefSelectorHtml({ owner, repo, ref, requestInfo, branches, tags, defaultBranch }) {
+  const branchHasRef = branches.some(branch => branch.name === ref);
+  const tagHasRef = tags.some(tag => tag.name === ref);
+  const currentIsTag = tagHasRef && !branchHasRef;
+  const branchItems = uniqueByName([
+    ...(ref && !branchHasRef && !currentIsTag ? [{ name: ref }] : []),
+    ...branches,
+  ]).map(branch => buildRefMenuItemHtml({
+    name: branch.name,
+    href: buildRefFilterHref(owner, repo, branch.name, requestInfo),
+    selected: branch.name === ref,
+    label: branch.name === defaultBranch ? 'default' : '',
+  })).join('');
+  const tagItems = uniqueByName(tags).map(tag => buildRefMenuItemHtml({
+    name: tag.name,
+    href: buildRefFilterHref(owner, repo, tag.name, requestInfo),
+    selected: tag.name === ref,
+    label: 'tag',
+  })).join('');
+
+  const label = ref || defaultBranch || 'Branch';
+  const activeTab = currentIsTag ? 'tags' : 'branches';
+  return `<details class="filter-popover ref-selector">
+    <summary data-component="Button" role="button" aria-haspopup="true" aria-expanded="false" tabindex="0" data-hotkey="w" aria-label="${escapeAttr(`${label} branch`)}" data-testid="anchor-button" data-icv-name="Switch branches/tags" class="prc-Button-ButtonBase-9n-Xk btn selector-button RefSelectorAnchoredOverlay-module__RefSelectorOverlayBtn__a3WK3" data-loading="false" data-size="medium" data-variant="default" id="ref-picker-commits">
+      <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5 button-content">
+        <span data-component="text" class="prc-Button-Label-FWkx3 button-label">
+          <span class="RefSelectorAnchoredOverlay-module__RefSelectorOverlayContainer__yaf4p ref-selector-overlay-container">
+            <span class="RefSelectorAnchoredOverlay-module__RefSelectorOverlayHeader__XtXRG ref-selector-overlay-header" aria-hidden="true">${GIT_BRANCH_ICON}</span>
+            <span class="ref-selector-button-text-container RefSelectorAnchoredOverlay-module__RefSelectorBtnTextContainer__Di3rk" style="max-width:125px">
+              <span class="RefSelectorAnchoredOverlay-module__RefSelectorText__w_fmP ref-selector-text">&nbsp;${escapeHtml(label)}</span>
+            </span>
+          </span>
+        </span>
+        <span data-component="trailingVisual" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-trailing" aria-hidden="true">${TRIANGLE_DOWN_ICON}</span>
+      </span>
+    </summary>
+    <div role="dialog" data-component="AnchoredOverlay" aria-label="Select a branch" data-anchor-position="false" data-side="outside-bottom" data-width-medium="" data-height-auto="" data-visibility-visible="" class="prc-Overlay-Overlay-jfs-T selector-overlay ref-selector-overlay">
+      <div data-testid="overlay-content" aria-labelledby="ref-picker-commits" id="selectPanel" class="selector-overlay-content">
+        <div class="RefSelectorV1-module__RefSelectorContainer__rEbu7">
+          <div class="RefSelectorV1-module__RefSelectorInnerContainer__q4YHK selector-heading">
+            <h2 class="RefSelectorV1-module__RefSelectorHeading__j2mcd prc-Heading-Heading-MtWFE" data-component="Heading">Switch branches/tags</h2>
+            <button data-component="IconButton" type="button" class="prc-Button-ButtonBase-9n-Xk RefSelectorV1-module__RefSelectorCloseButton__pTwr7 prc-Button-IconButton-fyge7 selector-close" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="invisible" aria-label="Close branch selector" data-close-selector>${X_ICON}</button>
+          </div>
+          <div class="RefSelectorV1-module__RefSelectorFilterContainer__UeAPt selector-filter-container">
+            <span class="RefSelectorV1-module__RefSelectorInput__xaRA4 TextInput-wrapper prc-components-TextInputWrapper-Hpdqi prc-components-TextInputBaseWrapper-wY-n0 selector-input-wrap" data-component="TextInput" data-leading-visual="true" aria-busy="false">
+              <span class="TextInput-icon" aria-hidden="true" data-component="TextInput.LeadingVisual">${SEARCH_ICON}</span>
+              <input aria-label="Filter branches" placeholder="Find a branch..." data-component="input" class="prc-components-Input-IwWrt selector-filter" data-filter-target="refs" type="text" value="">
+            </span>
+          </div>
+        </div>
+        <div class="px-2 pb-2">
+          <div class="RefSelector-module__RefSelectorTabs__j_8pE RefSelectorV1-module__RefTypeTabs__TQteC selector-tabs">
+            <nav aria-label="Ref type" class="prc-TabNav-TabNavNav-MHmhC">
+              <div role="tablist" class="prc-TabNav-TabNavTabList-Ave63 selector-tab-list">
+                <button data-component="Button" type="button" role="tab" tabindex="${activeTab === 'branches' ? '0' : '-1'}" aria-selected="${activeTab === 'branches' ? 'true' : 'false'}" aria-controls="branches" class="prc-Button-ButtonBase-9n-Xk TabNav-item prc-TabNav-TabNavLink-u3umI ${activeTab === 'branches' ? 'selected prc-TabNav-Selected-LYsaH' : ''} RefSelector-module__RefSelectorTabLink__NbcT1 selector-tab" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="default" id="branch-button" data-ref-tab-target="branches">
+                  <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5"><span data-component="text" class="prc-Button-Label-FWkx3">Branches</span></span>
+                </button>
+                <button data-component="Button" type="button" role="tab" tabindex="${activeTab === 'tags' ? '0' : '-1'}" aria-selected="${activeTab === 'tags' ? 'true' : 'false'}" aria-controls="tags" class="prc-Button-ButtonBase-9n-Xk TabNav-item prc-TabNav-TabNavLink-u3umI ${activeTab === 'tags' ? 'selected prc-TabNav-Selected-LYsaH' : ''} RefSelector-module__RefSelectorTabLink__NbcT1 selector-tab" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="default" id="tag-button" data-ref-tab-target="tags">
+                  <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5"><span data-component="text" class="prc-Button-Label-FWkx3">Tags</span></span>
+                </button>
+              </div>
+            </nav>
+          </div>
+        </div>
+        <div id="branches" role="tabpanel" aria-labelledby="branch-button" class="RefsList-module__FixedSizeVirtualList__YEA5B selector-list selector-panel" ${activeTab === 'branches' ? '' : 'hidden'}>
+          <ul class="prc-ActionList-ActionList-rPFF2" role="menu" data-component="ActionList" data-dividers="false" data-variant="inset" data-filter-list="refs">
+            ${branchItems || '<li class="selector-empty">No branches found</li>'}
+          </ul>
+        </div>
+        <div id="tags" role="tabpanel" aria-labelledby="tag-button" class="RefsList-module__FixedSizeVirtualList__YEA5B selector-list selector-panel" ${activeTab === 'tags' ? '' : 'hidden'}>
+          <ul class="prc-ActionList-ActionList-rPFF2" role="menu" data-component="ActionList" data-dividers="false" data-variant="inset" data-filter-list="refs">
+            ${tagItems || '<li class="selector-empty">No tags found</li>'}
+          </ul>
+        </div>
+        <ul class="prc-ActionList-ActionList-rPFF2 p-0 selector-footer-list" data-component="ActionList" data-dividers="false" data-variant="inset">
+          <li class="d-block mt-0 RefSelectorV1-module__Divider__Zk_Bk prc-ActionList-Divider-taVfb" aria-hidden="true" data-component="ActionList.Divider"></li>
+          <li data-component="ActionList.Item" data-has-description="false" class="prc-ActionList-ActionListItem-So4vC RefSelectorV1-module__ViewAllRefsActionLink__Z80Vu">
+            <a class="prc-ActionList-ActionListContent-KBb8- prc-Link-Link-9ZwDx selector-footer" data-component="Link" tabindex="0" role="link" data-size="medium" href="/${escapeAttr(owner)}/${escapeAttr(repo)}/branches" data-ref-footer="branches" ${activeTab === 'branches' ? '' : 'hidden'}><span class="prc-ActionList-Spacer-4tR2m"></span><span class="prc-ActionList-ActionListSubContent-gKsFp"><span class="prc-ActionList-ItemLabel-81ohH"><span class="RefSelectorV1-module__ViewAllRefsActionText__HfC03">View all branches</span></span></span></a>
+            <a class="prc-ActionList-ActionListContent-KBb8- prc-Link-Link-9ZwDx selector-footer" data-component="Link" tabindex="0" role="link" data-size="medium" href="/${escapeAttr(owner)}/${escapeAttr(repo)}/tags" data-ref-footer="tags" ${activeTab === 'tags' ? '' : 'hidden'}><span class="prc-ActionList-Spacer-4tR2m"></span><span class="prc-ActionList-ActionListSubContent-gKsFp"><span class="prc-ActionList-ItemLabel-81ohH"><span class="RefSelectorV1-module__ViewAllRefsActionText__HfC03">View all tags</span></span></span></a>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </details>`;
+}
+
+function buildUserMenuItemHtml({ login, avatar, href, selected }) {
+  return `<li role="none" class="user-menu-row" data-filter-value="${escapeAttr(String(login).toLowerCase())}">
+    <a role="menuitemradio" aria-checked="${selected ? 'true' : 'false'}" class="prc-ActionList-ActionListContent-KBb8- user-menu-item" data-size="medium" href="${escapeAttr(href)}">
+      <span class="prc-ActionList-LeadingAction-hbWbh prc-ActionList-VisualWrap-bdCsS checkmark" data-component="ActionList.Selection" aria-hidden="true">${selected ? CHECK_ICON : ''}</span>
+      <span class="prc-ActionList-LeadingVisual-NBr28 prc-ActionList-VisualWrap-bdCsS user-leading-visual" data-component="ActionList.LeadingVisual">
+        ${avatar ? `<img data-component="Avatar" class="prc-Avatar-Avatar-0xaUi avatar" alt="" width="20" height="20" data-testid="github-avatar" src="${escapeAttr(avatar)}">` : '<span class="avatar avatar-fallback"></span>'}
+      </span>
+      <span class="prc-ActionList-ActionListSubContent-gKsFp user-menu-subcontent">
+        <span class="prc-ActionList-ItemLabel-81ohH user-login">${escapeHtml(login)}</span>
+      </span>
+    </a>
+  </li>`;
+}
+
+function buildAllUsersMenuItemHtml({ owner, repo, ref, requestInfo }) {
+  const currentAuthor = requestInfo.author;
+  return `<li role="none" class="user-menu-row" data-filter-value="all users">
+    <a role="menuitemradio" aria-checked="${currentAuthor ? 'false' : 'true'}" class="prc-ActionList-ActionListContent-KBb8- user-menu-item" data-size="medium" href="${escapeAttr(buildAuthorFilterHref(owner, repo, ref, requestInfo, ''))}">
+      <span class="prc-ActionList-LeadingAction-hbWbh prc-ActionList-VisualWrap-bdCsS checkmark" data-component="ActionList.Selection" aria-hidden="true">${currentAuthor ? '' : CHECK_ICON}</span>
+      <span class="prc-ActionList-LeadingVisual-NBr28 prc-ActionList-VisualWrap-bdCsS user-leading-visual" data-component="ActionList.LeadingVisual">${PEOPLE_ICON}</span>
+      <span class="prc-ActionList-ActionListSubContent-gKsFp user-menu-subcontent"><span class="prc-ActionList-ItemLabel-81ohH user-login">All users</span></span>
+    </a>
+  </li>`;
+}
+
+function buildUserSelectorItemsHtml({ owner, repo, ref, requestInfo, users }) {
+  const currentAuthor = requestInfo.author;
+  const userItems = users.map(user => buildUserMenuItemHtml({
+    login: user.login,
+    avatar: rewriteOriginalUrlToProxy(user.avatar_url || ''),
+    href: buildAuthorFilterHref(owner, repo, ref, requestInfo, user.login),
+    selected: user.login === currentAuthor,
+  })).join('');
+
+  return `${buildAllUsersMenuItemHtml({ owner, repo, ref, requestInfo })}${userItems}`;
+}
+
+function buildUserSelectorHtml({ owner, repo, ref, requestInfo, users }) {
+  const currentAuthor = requestInfo.author;
+  const userItems = buildUserSelectorItemsHtml({ owner, repo, ref, requestInfo, users });
+  const usersDataHref = buildCommitUsersDataHref(owner, repo, ref, requestInfo);
+
+  return `<details class="filter-popover user-selector" data-users-url="${escapeAttr(usersDataHref)}" data-users-loaded="false">
+    <summary data-component="Button" role="button" data-testid="user-selector-button" aria-haspopup="true" aria-expanded="false" tabindex="0" class="prc-Button-ButtonBase-9n-Xk btn selector-button" data-loading="false" data-size="medium" data-variant="default" id="user-selector-commits">
+      <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5 button-content">
+        <span data-component="text" class="prc-Button-Label-FWkx3 button-label">
+          <span class="d-flex">
+            <span class="mr-2" aria-hidden="true">${PEOPLE_ICON}</span>
+            <span class="UserSelector-module__truncatedUserText__EmYes user-selector-truncated-text"><span>${escapeHtml(currentAuthor || 'All users')}</span></span>
+          </span>
+        </span>
+        <span data-component="trailingAction" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-trailing" aria-hidden="true">${TRIANGLE_DOWN_ICON}</span>
+      </span>
+    </summary>
+    <div role="dialog" data-component="AnchoredOverlay" data-anchor-position="false" data-width-medium="" data-height-auto="" data-side="outside-bottom" data-visibility-visible="" class="prc-Overlay-Overlay-jfs-T selector-overlay user-selector-overlay" aria-label="Select a user">
+      <div class="prc-ActionMenu-ActionMenuContainer-Om1Qz" data-variant="anchored">
+        <div class="p-2 border-bottom border-color-border-default selector-filter-container">
+          <span class="UserSelector-module__userSearchInput__pqcv4 TextInput-wrapper prc-components-TextInputWrapper-Hpdqi prc-components-TextInputBaseWrapper-wY-n0 selector-input-wrap" data-component="TextInput" data-leading-visual="true" aria-busy="false">
+            <span class="TextInput-icon" aria-hidden="true" data-component="TextInput.LeadingVisual">${SEARCH_ICON}</span>
+            <input placeholder="Find a user..." data-component="input" class="prc-components-Input-IwWrt selector-filter" data-filter-target="users" type="text" value="">
+          </span>
+        </div>
+        <div class="UsersList-module__scrollableUserList__MXL4H UserSelector-module__userListWithFooter__Gmfdb selector-list">
+          <ul class="prc-ActionList-ActionList-rPFF2" role="menu" aria-labelledby="user-selector-commits" data-component="ActionList" data-dividers="false" data-variant="inset" data-filter-list="users">
+            ${userItems}
+          </ul>
+          <div class="selector-empty user-selector-loading" hidden>Loading users...</div>
+          <div class="selector-empty user-selector-error" hidden>Unable to load users.</div>
+        </div>
+        <div class="px-2 tmp-py-3 border-top border-color-border-default selector-user-footer">
+          <a data-component="Button" role="button" href="${escapeAttr(buildAuthorFilterHref(owner, repo, ref, requestInfo, ''))}" class="prc-Button-ButtonBase-9n-Xk selector-footer" data-block="block" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="link" aria-keyshortcuts="v" tabindex="-1">
+            <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5"><span data-component="text" class="prc-Button-Label-FWkx3">View commits for all users</span></span>
+          </a>
+        </div>
+      </div>
+    </div>
+  </details>`;
+}
+
+function buildDatePickerHtml({ owner, repo, ref, requestInfo }) {
+  const basePath = buildCommitsBasePath(owner, repo, ref);
+  const label = requestInfo.since || requestInfo.until
+    ? `${requestInfo.since ? requestInfo.since.slice(0, 10) : 'Start'} - ${requestInfo.until ? requestInfo.until.slice(0, 10) : 'Now'}`
+    : 'All time';
+  const clearDateHref = `${basePath}${buildQueryString({
+    author: requestInfo.author,
+    path: requestInfo.path,
+  })}`;
+
+  return `<details class="filter-popover date-selector">
+    <summary data-component="Button" role="button" aria-haspopup="true" aria-expanded="false" tabindex="0" data-testid="date-picker-commits" class="prc-Button-ButtonBase-9n-Xk btn selector-button" data-loading="false" data-size="medium" data-variant="default">
+      <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5 button-content">
+        <span data-component="leadingVisual" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-leading" aria-hidden="true">${CALENDAR_ICON}</span>
+        <span data-component="text" class="prc-Button-Label-FWkx3 button-label">${escapeHtml(label)}</span>
+        <span data-component="trailingVisual" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-trailing" aria-hidden="true">${TRIANGLE_DOWN_ICON}</span>
+      </span>
+    </summary>
+    <div role="dialog" data-component="AnchoredOverlay" aria-label="Date Picker" aria-modal="true" data-anchor-position="false" data-width-auto="" data-height-auto="" data-side="outside-bottom" data-visibility-visible="" class="Overlay-module__overlay__jq7s5 prc-Overlay-Overlay-jfs-T selector-overlay date-overlay">
+      <form class="Panel-module__container__tJ7zS date-path-filter date-panel" method="get" action="${escapeAttr(basePath)}">
+        <header class="Panel-module__topNav__Xrczs date-panel-header">
+          <span class="Panel-module__pickers__NDS79 date-panel-title">Date range</span>
+          <button data-component="IconButton" type="button" class="prc-Button-ButtonBase-9n-Xk prc-Button-IconButton-fyge7 selector-close" data-loading="false" data-no-visuals="true" data-size="small" data-variant="invisible" aria-label="Close date picker" data-close-selector>${X_ICON}</button>
+        </header>
+        ${requestInfo.author ? `<input type="hidden" name="author" value="${escapeAttr(requestInfo.author)}"/>` : ''}
+        ${requestInfo.path ? `<input type="hidden" name="path" value="${escapeAttr(requestInfo.path)}"/>` : ''}
+        <div class="date-panel-fields">
+          <div class="field">
+            <label for="since-input">Since</label>
+            <input id="since-input" name="since" type="date" value="${escapeAttr(requestInfo.since.slice(0, 10))}"/>
+          </div>
+          <div class="field">
+            <label for="until-input">Until</label>
+            <input id="until-input" name="until" type="date" value="${escapeAttr(requestInfo.until.slice(0, 10))}"/>
+          </div>
+        </div>
+        <footer class="Panel-module__footer__zBnyZ date-panel-footer">
+          <a class="prc-Button-ButtonBase-9n-Xk link-btn" data-size="small" data-variant="invisible" href="${escapeAttr(clearDateHref)}">Clear</a>
+          <button class="prc-Button-ButtonBase-9n-Xk btn" data-size="small" data-variant="default" type="submit">Apply</button>
+        </footer>
+      </form>
+    </div>
+  </details>`;
+}
+
+function buildCommitsFiltersHtml({ owner, repo, ref, requestInfo, branches, tags, users, defaultBranch }) {
+  return `<div class="tmp-mb-3 filters prc-Stack-Stack-UQ9k6" data-gap="condensed" data-direction="horizontal" data-align="stretch" data-wrap="nowrap" data-justify="space-between" data-padding="none">
+    <h2 class="sr-only prc-Heading-Heading-MtWFE" data-component="Heading">Branch selector</h2>
+    ${buildRefSelectorHtml({ owner, repo, ref, requestInfo, branches, tags, defaultBranch })}
+    <div class="selector-actions-group d-flex flex-column flex-sm-row gap-2">
+      <h2 class="sr-only prc-Heading-Heading-MtWFE" data-component="Heading">User selector</h2>
+      <div>${buildUserSelectorHtml({ owner, repo, ref, requestInfo, users })}</div>
+      <h2 class="sr-only prc-Heading-Heading-MtWFE" data-component="Heading">Datepicker</h2>
+      ${buildDatePickerHtml({ owner, repo, ref, requestInfo })}
+    </div>
+  </div>`;
+}
+
+function buildCommitsHtml({ requestInfo, repo, ref, commits, error, rate, pagination, branches = [], tags = [], users = [] }) {
   const owner = requestInfo.owner;
   const repoName = requestInfo.repo;
   const repoFullName = repo?.full_name || `${owner}/${repoName}`;
   const groups = groupCommitsByDate(commits);
   const basePath = buildCommitsBasePath(owner, repoName, ref);
-  const resetHref = basePath;
   const nextHref = `${basePath}${buildCommitsQuery(requestInfo, { p: requestInfo.page + 1 })}`;
   const prevHref = `${basePath}${buildCommitsQuery(requestInfo, { p: Math.max(1, requestInfo.page - 1) })}`;
-  const currentPath = requestInfo.path || '';
   const title = `Commits - ${repoFullName}`;
   const rateHtml = rate?.limit ? `<span>API: ${escapeHtml(rate.remaining)}/${escapeHtml(rate.limit)} remaining</span>` : '';
   const errorHtml = error ? `<div class="commits-error">${escapeHtml(error)}</div>` : '';
+  const filtersHtml = buildCommitsFiltersHtml({
+    owner,
+    repo: repoName,
+    ref,
+    requestInfo,
+    branches,
+    tags,
+    users,
+    defaultBranch: repo?.default_branch || '',
+  });
   const groupHtml = groups.map(group => `
     <section class="commit-group">
       <div class="timeline-dot" aria-hidden="true"></div>
@@ -2346,10 +2634,337 @@ h1 {
 }
 .filters {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: end;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 22px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+[hidden] { display: none !important; }
+.filter-popover {
+  position: relative;
+  display: inline-flex;
+}
+.filter-popover > summary {
+  list-style: none;
+}
+.filter-popover > summary::-webkit-details-marker {
+  display: none;
+}
+.selector-button {
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  user-select: none;
+}
+.button-content,
+.ref-selector-overlay-container,
+.d-flex {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.button-content {
+  gap: 8px;
+}
+.button-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.button-leading,
+.button-trailing,
+.ref-selector-overlay-header,
+.mr-2 {
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.mr-2 {
+  margin-right: 8px;
+}
+.ref-selector-button-text-container,
+.user-selector-truncated-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ref-selector-text {
+  display: inline-block;
+}
+.selector-overlay {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(320px, calc(100vw - 32px));
+  max-height: 520px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 16px 32px rgba(31, 35, 40, .15);
+}
+.selector-overlay-content,
+.prc-ActionMenu-ActionMenuContainer-Om1Qz {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+  min-height: 0;
+}
+.user-selector-overlay .prc-ActionMenu-ActionMenuContainer-Om1Qz {
+  height: 100%;
+}
+.user-selector .selector-overlay {
+  right: 0;
+  left: auto;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 32px));
+}
+.date-selector .selector-overlay {
+  right: 0;
+  left: auto;
+  width: min(300px, calc(100vw - 32px));
+}
+.selector-actions-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.selector-actions-group > div {
+  display: flex;
+}
+.selector-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.selector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.selector-heading h2 {
+  margin: 0;
+  font-size: 14px;
+}
+.selector-close {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.selector-filter-container {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.selector-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+}
+.TextInput-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.selector-filter {
+  min-width: 0;
+  width: 100%;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+}
+.selector-tabs {
+  padding: 0 8px;
+  color: var(--muted);
+}
+.selector-tab-list {
+  display: flex;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--border);
+}
+.selector-tab {
+  height: 38px;
+  padding: 0 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+.selector-tab.selected {
+  color: var(--fg);
+  border-bottom-color: #fd8c73;
+  font-weight: 600;
+}
+.selector-list {
+  max-height: 330px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.user-selector-overlay .selector-list {
+  flex: 1 1 auto;
+  max-height: min(360px, calc(100vh - 180px));
+}
+.selector-list ul {
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+}
+.user-menu-row {
+  display: block;
+}
+.ref-menu-item,
+.user-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--fg);
+}
+.ref-menu-item:hover,
+.user-menu-item:hover {
+  background: var(--subtle);
+  text-decoration: none;
+}
+.checkmark {
+  width: 18px;
+  flex: 0 0 18px;
+  color: var(--success);
+}
+.user-leading-visual {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  color: var(--muted);
+}
+.user-leading-visual .avatar {
+  width: 20px;
+  height: 20px;
+}
+.user-menu-subcontent {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+.user-login {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ref-menu-subcontent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.ref-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ref-label {
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+}
+.selector-empty {
+  padding: 12px;
+  color: var(--muted);
+}
+.selector-footer-list {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  list-style: none;
+}
+.selector-footer {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 12px;
+  color: var(--fg);
+}
+.selector-user-footer {
+  padding: 8px;
+}
+.selector-user-footer .selector-footer {
+  justify-content: center;
+  width: 100%;
+  color: var(--accent);
+}
+.date-path-filter {
+  display: block;
+  padding: 0;
+}
+.date-panel-header,
+.date-panel-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+}
+.date-panel-header {
+  border-bottom: 1px solid var(--border);
+}
+.date-panel-title {
+  color: var(--fg);
+  font-weight: 600;
+}
+.date-panel-fields {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.date-panel-footer {
+  border-top: 1px solid var(--border);
+  justify-content: flex-end;
 }
 .field {
   display: grid;
@@ -2371,6 +2986,18 @@ h1 {
   font: inherit;
 }
 .field.ref input { min-width: 190px; }
+.p-2 { padding: 8px; }
+.px-2 {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.pb-2 { padding-bottom: 8px; }
+.tmp-py-3 {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+.border-bottom { border-bottom: 1px solid var(--border); }
+.border-top { border-top: 1px solid var(--border); }
 .btn, .link-btn {
   display: inline-flex;
   align-items: center;
@@ -2434,22 +3061,22 @@ h1 {
   border-top: 1px solid var(--border);
 }
 .commit-row:first-child { border-top: 0; }
+.commit-title-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
 .commit-title {
   display: inline-block;
-  max-width: 100%;
   color: var(--fg);
   font-weight: 600;
   overflow-wrap: anywhere;
 }
-.commit-body {
-  max-width: 780px;
-  margin: 8px 0 0;
-  padding: 10px;
+.commit-title code {
+  font: 12px/1.4 ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+  padding: 1px 5px;
   border-radius: 6px;
   background: var(--subtle);
-  color: var(--muted);
-  font: 12px/1.45 ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
-  white-space: pre-wrap;
 }
 .commit-meta {
   display: flex;
@@ -2532,6 +3159,14 @@ button.icon-btn { cursor: pointer; }
   .commit-row { display: block; }
   .commit-actions { margin-top: 10px; }
   .field, .field input { width: 100%; }
+  .filters { flex-direction: column; }
+  .selector-actions-group { justify-content: flex-start; }
+  .selector-overlay,
+  .user-selector .selector-overlay,
+  .date-selector .selector-overlay {
+    left: 0;
+    right: auto;
+  }
 }
 </style>
 </head>
@@ -2551,30 +3186,7 @@ button.icon-btn { cursor: pointer; }
     <h1>Commits</h1>
     <div class="rate">${rateHtml}</div>
   </div>
-  <form class="filters" method="get" action="${escapeAttr(basePath)}">
-    <div class="field ref">
-      <label for="ref-input">Branch or SHA</label>
-      <input id="ref-input" name="sha" value="${escapeAttr(ref)}" autocomplete="off"/>
-    </div>
-    <div class="field">
-      <label for="author-input">Author</label>
-      <input id="author-input" name="author" value="${escapeAttr(requestInfo.author)}" autocomplete="off"/>
-    </div>
-    <div class="field">
-      <label for="since-input">Since</label>
-      <input id="since-input" name="since" type="date" value="${escapeAttr(requestInfo.since.slice(0, 10))}"/>
-    </div>
-    <div class="field">
-      <label for="until-input">Until</label>
-      <input id="until-input" name="until" type="date" value="${escapeAttr(requestInfo.until.slice(0, 10))}"/>
-    </div>
-    <div class="field">
-      <label for="path-input">Path</label>
-      <input id="path-input" name="path" value="${escapeAttr(currentPath)}" autocomplete="off"/>
-    </div>
-    <button class="btn" type="submit">Filter</button>
-    <a class="link-btn" href="${escapeAttr(resetHref)}">Reset</a>
-  </form>
+  ${filtersHtml}
   ${errorHtml}
   <div class="timeline">
     ${groupHtml}
@@ -2586,16 +3198,132 @@ button.icon-btn { cursor: pointer; }
   </nav>
 </main>
 <script>
+function applySelectorFilter(input) {
+  const key = input.getAttribute('data-filter-target');
+  const value = input.value.trim().toLowerCase();
+  document.querySelectorAll('[data-filter-list="' + key + '"]').forEach(function (list) {
+    list.querySelectorAll('[data-filter-value]').forEach(function (item) {
+      item.hidden = value && !item.getAttribute('data-filter-value').includes(value);
+    });
+  });
+}
+
+function loadCommitUsers(details) {
+  if (!details || details.getAttribute('data-users-loaded') === 'true') return;
+  if (details.getAttribute('data-users-loading') === 'true') return;
+  const url = details.getAttribute('data-users-url');
+  const list = details.querySelector('[data-filter-list="users"]');
+  const loading = details.querySelector('.user-selector-loading');
+  const error = details.querySelector('.user-selector-error');
+  if (!url || !list) return;
+
+  details.setAttribute('data-users-loading', 'true');
+  if (loading) loading.hidden = false;
+  if (error) error.hidden = true;
+
+  fetch(url, { headers: { accept: 'application/json' } }).then(function (response) {
+    return response.json().then(function (data) {
+      return { response: response, data: data };
+    });
+  }).then(function (result) {
+    if (!result.response.ok) throw new Error('Unable to load users');
+    const data = result.data;
+    if (typeof data.itemsHtml === 'string' && data.itemsHtml) {
+      list.innerHTML = data.itemsHtml;
+    }
+    details.setAttribute('data-users-loaded', 'true');
+    const input = details.querySelector('[data-filter-target="users"]');
+    if (input) applySelectorFilter(input);
+  }).catch(function () {
+    if (error) error.hidden = false;
+  }).finally(function () {
+    details.removeAttribute('data-users-loading');
+    if (loading) loading.hidden = true;
+  });
+}
+
+document.querySelectorAll('.filter-popover').forEach(function (details) {
+  function syncExpanded() {
+    const summary = details.querySelector('summary');
+    if (summary) summary.setAttribute('aria-expanded', details.open ? 'true' : 'false');
+  }
+
+  details.addEventListener('toggle', function () {
+    syncExpanded();
+    if (!details.open) return;
+    document.querySelectorAll('.filter-popover[open]').forEach(function (other) {
+      if (other !== details) other.open = false;
+    });
+    if (details.classList.contains('user-selector')) loadCommitUsers(details);
+  });
+  syncExpanded();
+});
+
+document.addEventListener('input', function (event) {
+  const input = event.target.closest('.selector-filter');
+  if (!input) return;
+  applySelectorFilter(input);
+});
+
 document.addEventListener('click', function (event) {
+  const tab = event.target.closest('[data-ref-tab-target]');
+  if (tab) {
+    event.preventDefault();
+    const overlay = tab.closest('.ref-selector-overlay');
+    const target = tab.getAttribute('data-ref-tab-target');
+    if (overlay && target) {
+      overlay.querySelectorAll('[data-ref-tab-target]').forEach(function (item) {
+        const active = item === tab;
+        item.classList.toggle('selected', active);
+        item.classList.toggle('prc-TabNav-Selected-LYsaH', active);
+        item.setAttribute('aria-selected', active ? 'true' : 'false');
+        item.setAttribute('tabindex', active ? '0' : '-1');
+      });
+      overlay.querySelectorAll('.selector-panel').forEach(function (panel) {
+        panel.hidden = panel.id !== target;
+      });
+      overlay.querySelectorAll('[data-ref-footer]').forEach(function (footer) {
+        footer.hidden = footer.getAttribute('data-ref-footer') !== target;
+      });
+      const input = overlay.querySelector('[data-filter-target="refs"]');
+      if (input) {
+        input.placeholder = target === 'tags' ? 'Find a tag...' : 'Find a branch...';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+      }
+    }
+    return;
+  }
+
+  const closeButton = event.target.closest('[data-close-selector]');
+  if (closeButton) {
+    event.preventDefault();
+    const details = closeButton.closest('.filter-popover');
+    if (details) details.open = false;
+    return;
+  }
+
+  document.querySelectorAll('.filter-popover[open]').forEach(function (details) {
+    if (!details.contains(event.target)) details.open = false;
+  });
+
   const button = event.target.closest('.copy-sha');
   if (!button) return;
   const sha = button.getAttribute('data-sha') || '';
   if (!sha) return;
-  Promise.resolve(navigator.clipboard && navigator.clipboard.writeText(sha)).then(function () {
+  if (!navigator.clipboard || !navigator.clipboard.writeText) return;
+  navigator.clipboard.writeText(sha).then(function () {
     const oldText = button.textContent;
     button.textContent = 'Copied';
     setTimeout(function () { button.textContent = oldText; }, 1200);
   }).catch(function () {});
+});
+
+document.addEventListener('keydown', function (event) {
+  if (event.key !== 'Escape') return;
+  document.querySelectorAll('.filter-popover[open]').forEach(function (details) {
+    details.open = false;
+  });
 });
 </script>
 </body>
@@ -2749,12 +3477,6 @@ async function handleEntryRequest(url, origin, env) {
   ) {
     return NOT_FOUND();
   }
-  if (ENABLE_STRICT_DEFENSE && (
-    shouldBlockStrictDefensePath('github.com', url.pathname) ||
-    shouldBlockStrictDefensePath('github.com', decodedPath)
-  )) {
-    return NOT_FOUND();
-  }
   if (hasSensitiveQueryParam(url.search)) {
     return NOT_FOUND();
   }
@@ -2801,11 +3523,28 @@ async function handleProxyRequest(request, url, origin, effectiveHost, env) {
     return Response.redirect(`https://${ENTRY_DOMAIN}/`, 302);
   }
 
+  if (currentOrigin === 'github.com' && request.method === 'GET') {
+    const commitsSearchParams = new URLSearchParams(mergedSearch.replace(/^\?/, ''));
+    if (commitsSearchParams.get('commits_users') === '1') {
+      const commitsInfo = parseCommitsPageRequest(canonicalPath, commitsSearchParams);
+      if (commitsInfo) {
+        return handleCommitUsersRequest(commitsInfo, origin, env);
+      }
+    }
+  }
+
   if (currentOrigin === 'github.com' && canonicalPath === '/search' && request.method === 'GET') {
     const searchUrl = new URL(url);
     searchUrl.pathname = '/search';
     searchUrl.search = mergedSearch;
     return handleSearchRequest(searchUrl, origin, env);
+  }
+
+  if (currentOrigin === 'github.com' && request.method === 'GET' && isHtmlNavigationRequest(request)) {
+    const commitsInfo = parseCommitsPageRequest(canonicalPath, new URLSearchParams(mergedSearch.replace(/^\?/, '')));
+    if (commitsInfo) {
+      return handleCommitsRequest(commitsInfo, origin, env);
+    }
   }
 
   // 对路径做解码和规范化后再进行敏感路径检测。
@@ -2814,12 +3553,6 @@ async function handleProxyRequest(request, url, origin, effectiveHost, env) {
     shouldBlockGithubWebPath(currentOrigin, canonicalPath) ||
     shouldBlockGithubWebPath(currentOrigin, decodedPath)
   ) {
-    return NOT_FOUND();
-  }
-  if (ENABLE_STRICT_DEFENSE && (
-    shouldBlockStrictDefensePath(currentOrigin, canonicalPath) ||
-    shouldBlockStrictDefensePath(currentOrigin, decodedPath)
-  )) {
     return NOT_FOUND();
   }
 
@@ -2853,11 +3586,10 @@ async function handleProxyRequest(request, url, origin, effectiveHost, env) {
     }
   }
 
-  const pathname = fixCommitInfoPath(canonicalPath);
   const upstream = new URL(url);
   upstream.protocol = 'https:';
   upstream.host = currentOrigin;
-  upstream.pathname = pathname;
+  upstream.pathname = canonicalPath;
 
   // 转发前清理敏感查询参数。
   upstream.search = sanitizeSearchParams(mergedSearch);
@@ -2896,7 +3628,7 @@ async function handleProxyRequest(request, url, origin, effectiveHost, env) {
     headers.delete('cookie');
   }
 
-  attachGitHubToken(headers, env, request, currentOrigin, pathname);
+  attachGitHubToken(headers, env, request, currentOrigin, canonicalPath);
 
   // 为上游请求设置超时控制。
   const controller = new AbortController();

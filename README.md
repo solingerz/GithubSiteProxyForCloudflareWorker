@@ -12,13 +12,12 @@
 - 入口页与代理页分离：`gh.<你的域名>` 提供终端风格首页，非首页请求会自动跳转到对应代理子域。
 - 自动改写白名单域名：会改写 HTML、CSS、JavaScript、XML、JSON 中的域名引用，保证页面链接、静态资源和 API 请求继续走代理。
 - 跨域名自动纠正：如果路径里嵌入了 `https://github.com/...`、`https://raw.githubusercontent.com/...` 之类的目标地址，会自动跳转到正确的代理子域。
-- 特殊路径修复：内置 `latest-commit`、`tree-commit-info` 等嵌套 URL 修复逻辑。
 - 基础 CORS 支持：处理预检请求，并把跨域所需响应头补齐。
 - 安全清洗：会剥离 `Authorization`、真实 IP、转发链等敏感请求头，只保留匿名访问所需的少量 Cookie。
-- GitHub Token：可通过 Worker secret 配置 `GITHUB_TOKEN`，仅对 GitHub 官方上游域名的 GET/HEAD 请求注入，并对身份、通知、授权和管理类路径做排除。
+- GitHub Token：可通过 Worker secret 配置 `GITHUB_TOKEN`，仅对 `api.github.com` 的少量公开只读接口注入。
 - 只读代理模式：允许 GET、HEAD，以及 Git Smart HTTP 匿名 clone/fetch 所需的 `git-upload-pack` POST；其他写操作（PUT/DELETE/PATCH、`git-receive-pack` 等）返回 405。
 - 超时控制：上游请求超时为 15 秒。
-- API 驱动的搜索：首页输入框除支持 `owner/repo` 和完整 URL 外，还支持输入任意关键词打开本地 `/search` 页面，并通过 GitHub REST Search API 填充 Code、仓库、Issue、Pull request 和 Users 结果。
+- API 驱动的搜索：首页输入框除支持 `owner/repo` 和 GitHub URL 外，还支持输入任意关键词打开本地 `/search` 页面，并通过 GitHub REST Search API 填充 Code、仓库、Issue、Pull request 和 Users 结果。
 - 可选地域回源：支持按国家/地区直接回源到真实站点，默认开启。
 
 ## 默认白名单域名
@@ -61,14 +60,12 @@ const PROXY_DOMAIN_SUFFIX = 'example.com';
 const PROXY_DOMAIN_SUFFIX = 'example.com';
 const ENABLE_GEO_REDIRECT = true;
 const ALLOWED_COUNTRIES = ['CN'];
-const ENABLE_STRICT_DEFENSE = true;
 const GITHUB_TOKEN_ENV = 'GITHUB_TOKEN';
 ```
 
 - `PROXY_DOMAIN_SUFFIX`：必填，你自己的主域名。
 - `ENABLE_GEO_REDIRECT`：是否把指定地区以外的访问直接跳回真实上游域名，默认 `true`。
 - `ALLOWED_COUNTRIES`：仅在开启地域回源时生效，默认只允许 `CN` 继续走代理。
-- `ENABLE_STRICT_DEFENSE`：是否额外拦截常见后台、探测、扫描类路径，默认开启。
 - `GITHUB_TOKEN_ENV`：GitHub token 对应的 Worker secret 名称，默认 `GITHUB_TOKEN`。
 
 另外还有两个与行为强相关的常量：
@@ -93,13 +90,14 @@ const GITHUB_TOKEN_ENV = 'GITHUB_TOKEN';
 wrangler secret put GITHUB_TOKEN
 ```
 
-代码只会在代理目标是 GitHub 官方上游域名且请求方法为 `GET`/`HEAD` 时注入该 token，例如 `github.com`、`api.github.com`、`raw.githubusercontent.com`、`codeload.github.com`、`release-assets.githubusercontent.com` 等。
+代码只会在代理目标是 `api.github.com` 且请求方法为 `GET`/`HEAD` 时注入该 token，并且路径必须命中以下公开只读接口：
 
-为避免 token 泄露或返回 token 持有者上下文数据，以下情况不会附带服务端 token：
-
-- 非 GitHub token 接收方：`cdn.jsdelivr.net`、`npmjs.com`、`api.npms.io`、`www.githubstatus.com`、`github.global.ssl.fastly.net` 等。
-- GitHub 主站 HTML 页面导航请求。
-- `api.github.com` 的身份、通知、授权、App/Installation、企业、计费、组织管理、仓库管理、安全扫描、Actions secrets/runners 等高风险路径。
+- `/search/code`、`/search/repositories`、`/search/issues`、`/search/users`
+- `/repos/<owner>/<repo>`
+- `/repos/<owner>/<repo>/commits`
+- `/repos/<owner>/<repo>/branches`
+- `/repos/<owner>/<repo>/tags`
+- `/repos/<owner>/<repo>/contributors`
 
 建议使用没有私有仓库权限的 token，不要使用带 `repo` 私有仓库权限的经典 token，也不要给 fine-grained token 授权私有仓库。否则访问者可能通过公共代理读取 token 可访问的私有 API 数据。
 
@@ -127,10 +125,9 @@ wrangler secret put GITHUB_TOKEN
 - 首页：`https://gh.<你的域名>`
 - 直达仓库：`https://gh.<你的域名>/vuejs/core`
 - Git clone：`git clone https://<github.com 对应的代理子域>/facebook/create-react-app.git`
-- 首页输入框支持四种输入：
+- 首页输入框支持三种输入：
   - `owner/repo` — 直达仓库
   - `https://github.com/owner/repo` — 识别 GitHub URL 并跳转
-  - 白名单域名 URL（如 `https://avatars.githubusercontent.com/u/123`）— 自动跳转到对应代理子域
   - 任意关键词 — 打开本地仓库搜索页，结果来自 GitHub REST Search API
 
 入口域名收到非首页请求后，会自动 302 到对应的哈希代理子域。后续页面里涉及的 Raw、头像、静态资源、Docs、Gist、NPM 等白名单域名，也会自动改写到对应代理域名。
@@ -144,7 +141,7 @@ wrangler secret put GITHUB_TOKEN
 - 会拦截常见敏感查询参数：`return_to`、`redirect_to`、`next`、`continue`、`destination`。
 - 会移除 URL 中的 `access_token`、`token` 等参数。
 - 会移除 `authorization`、`x-forwarded-*`、`cf-connecting-ip`、`x-real-ip` 等敏感请求头。
-- 如果配置了 `GITHUB_TOKEN`，Worker 会在清理用户请求头之后，仅对安全范围内的 GitHub 官方上游请求注入服务端 token。
+- 如果配置了 `GITHUB_TOKEN`，Worker 会在清理用户请求头之后，仅对明确允许的 `api.github.com` 只读接口注入服务端 token。
 - 只允许透传 `_gh_sess` 和 `_octo` 两个匿名访问相关 Cookie，并限制单个值长度。
 - 对于超过 5MB 的文本响应，不会做正文替换，因此极大文本页面可能仍保留原始域名引用。
 - 支持公开仓库的匿名 `git clone` / `git fetch`；不支持 SSH、GitHub CLI 登录态操作、私有仓库或需要认证的 Git 操作。
