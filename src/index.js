@@ -2025,10 +2025,10 @@ async function handleCommitUsersRequest(requestInfo, origin, env) {
   const contributorUsersResult = await fetchRepoContributorUsers(requestInfo.owner, requestInfo.repo, env, apiOptions);
   const users = buildCommitUserOptions(requestInfo.author, contributorUsersResult.users || []);
   return jsonResponse({
-    count: users.length,
-    itemsHtml: buildUserSelectorItemsHtml({ owner: requestInfo.owner, repo: requestInfo.repo, ref, requestInfo, users }),
+    count: users.length + 1,
+    itemsHtml: buildUserFilterItemsHtml({ owner: requestInfo.owner, repo: requestInfo.repo, ref, requestInfo, users }),
     error: contributorUsersResult.ok ? null : contributorUsersResult.error,
-  }, 200, origin);
+  }, contributorUsersResult.ok ? 200 : contributorUsersResult.status || 502, origin);
 }
 
 function parseGitHubPagination(linkHeader) {
@@ -2244,26 +2244,16 @@ function buildInitialCommitUserOptions(currentAuthor) {
 }
 
 function buildRefMenuItemHtml({ name, href, selected, label }) {
-  return `<li role="none" class="prc-ActionList-ActionListItem-So4vC ref-menu-row" data-component="ActionList.Item" data-has-description="false" data-filter-value="${escapeAttr(String(name).toLowerCase())}">
-    <a role="menuitemradio" aria-checked="${selected ? 'true' : 'false'}" class="prc-ActionList-ActionListContent-KBb8- ref-menu-item" data-size="medium" href="${escapeAttr(href)}">
-      <span class="prc-ActionList-LeadingAction-hbWbh prc-ActionList-VisualWrap-bdCsS checkmark" aria-hidden="true">${selected ? CHECK_ICON : ''}</span>
-      <span class="prc-ActionList-ActionListSubContent-gKsFp ref-menu-subcontent">
-        <span class="prc-ActionList-ItemLabel-81ohH ref-name">${escapeHtml(name)}</span>
-        ${label ? `<span class="prc-Label-Label-qG-Zu ref-label" data-size="small" data-variant="default" data-component="Label">${escapeHtml(label)}</span>` : ''}
-      </span>
+  return `<li class="option-row" data-filter-value="${escapeAttr(String(name).toLowerCase())}">
+    <a role="menuitemradio" aria-checked="${selected ? 'true' : 'false'}" class="filter-option ${selected ? 'active' : ''}" href="${escapeAttr(href)}">
+      <span class="option-check" aria-hidden="true">${selected ? '&#10003;' : ''}</span>
+      <span class="option-label">${escapeHtml(name)}</span>
+      ${label ? `<span class="option-badge">${escapeHtml(label)}</span>` : ''}
     </a>
   </li>`;
 }
 
-const GIT_BRANCH_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-git-branch" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"></path></svg>`;
-const PEOPLE_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-people fgColor-muted" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M2 5.5a3.5 3.5 0 1 1 5.898 2.549 5.508 5.508 0 0 1 3.034 4.084.75.75 0 1 1-1.482.235 4 4 0 0 0-7.9 0 .75.75 0 0 1-1.482-.236A5.507 5.507 0 0 1 3.102 8.05 3.493 3.493 0 0 1 2 5.5ZM11 4a3.001 3.001 0 0 1 2.22 5.018 5.01 5.01 0 0 1 2.56 3.012.749.749 0 0 1-.885.954.752.752 0 0 1-.549-.514 3.507 3.507 0 0 0-2.522-2.372.75.75 0 0 1-.574-.73v-.352a.75.75 0 0 1 .416-.672A1.5 1.5 0 0 0 11 5.5.75.75 0 0 1 11 4Zm-5.5-.5a2 2 0 1 0-.001 3.999A2 2 0 0 0 5.5 3.5Z"></path></svg>`;
-const CALENDAR_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-calendar fgColor-muted" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M4.75 0a.75.75 0 0 1 .75.75V2h5V.75a.75.75 0 0 1 1.5 0V2h1.25c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 13.25 16H2.75A1.75 1.75 0 0 1 1 14.25V3.75C1 2.784 1.784 2 2.75 2H4V.75A.75.75 0 0 1 4.75 0ZM2.5 7.5v6.75c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V7.5Zm10.75-4H2.75a.25.25 0 0 0-.25.25V6h11V3.75a.25.25 0 0 0-.25-.25Z"></path></svg>`;
-const TRIANGLE_DOWN_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-triangle-down" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="m4.427 7.427 3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z"></path></svg>`;
-const CHECK_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-check" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path></svg>`;
-const SEARCH_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-search" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path></svg>`;
-const X_ICON = `<svg data-component="Octicon" aria-hidden="true" focusable="false" class="octicon octicon-x" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style="vertical-align:text-bottom"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"></path></svg>`;
-
-function buildRefSelectorHtml({ owner, repo, ref, requestInfo, branches, tags, defaultBranch }) {
+function buildRefFilterHtml({ owner, repo, ref, requestInfo, branches, tags, defaultBranch }) {
   const branchHasRef = branches.some(branch => branch.name === ref);
   const tagHasRef = tags.some(tag => tag.name === ref);
   const currentIsTag = tagHasRef && !branchHasRef;
@@ -2285,65 +2275,37 @@ function buildRefSelectorHtml({ owner, repo, ref, requestInfo, branches, tags, d
 
   const label = ref || defaultBranch || 'Branch';
   const activeTab = currentIsTag ? 'tags' : 'branches';
-  return `<details class="filter-popover ref-selector">
-    <summary data-component="Button" role="button" aria-haspopup="true" aria-expanded="false" tabindex="0" data-hotkey="w" aria-label="${escapeAttr(`${label} branch`)}" data-testid="anchor-button" data-icv-name="Switch branches/tags" class="prc-Button-ButtonBase-9n-Xk btn selector-button RefSelectorAnchoredOverlay-module__RefSelectorOverlayBtn__a3WK3" data-loading="false" data-size="medium" data-variant="default" id="ref-picker-commits">
-      <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5 button-content">
-        <span data-component="text" class="prc-Button-Label-FWkx3 button-label">
-          <span class="RefSelectorAnchoredOverlay-module__RefSelectorOverlayContainer__yaf4p ref-selector-overlay-container">
-            <span class="RefSelectorAnchoredOverlay-module__RefSelectorOverlayHeader__XtXRG ref-selector-overlay-header" aria-hidden="true">${GIT_BRANCH_ICON}</span>
-            <span class="ref-selector-button-text-container RefSelectorAnchoredOverlay-module__RefSelectorBtnTextContainer__Di3rk" style="max-width:125px">
-              <span class="RefSelectorAnchoredOverlay-module__RefSelectorText__w_fmP ref-selector-text">&nbsp;${escapeHtml(label)}</span>
-            </span>
-          </span>
-        </span>
-        <span data-component="trailingVisual" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-trailing" aria-hidden="true">${TRIANGLE_DOWN_ICON}</span>
-      </span>
+  return `<details class="filter-dropdown ref-filter">
+    <summary class="filter-button" role="button" aria-haspopup="true" aria-expanded="false" aria-label="${escapeAttr(`Current ref: ${label}`)}" id="ref-picker-commits">
+      <span class="filter-button-label">Branch</span>
+      <span class="filter-button-value">${escapeHtml(label)}</span>
     </summary>
-    <div role="dialog" data-component="AnchoredOverlay" aria-label="Select a branch" data-anchor-position="false" data-side="outside-bottom" data-width-medium="" data-height-auto="" data-visibility-visible="" class="prc-Overlay-Overlay-jfs-T selector-overlay ref-selector-overlay">
-      <div data-testid="overlay-content" aria-labelledby="ref-picker-commits" id="selectPanel" class="selector-overlay-content">
-        <div class="RefSelectorV1-module__RefSelectorContainer__rEbu7">
-          <div class="RefSelectorV1-module__RefSelectorInnerContainer__q4YHK selector-heading">
-            <h2 class="RefSelectorV1-module__RefSelectorHeading__j2mcd prc-Heading-Heading-MtWFE" data-component="Heading">Switch branches/tags</h2>
-            <button data-component="IconButton" type="button" class="prc-Button-ButtonBase-9n-Xk RefSelectorV1-module__RefSelectorCloseButton__pTwr7 prc-Button-IconButton-fyge7 selector-close" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="invisible" aria-label="Close branch selector" data-close-selector>${X_ICON}</button>
-          </div>
-          <div class="RefSelectorV1-module__RefSelectorFilterContainer__UeAPt selector-filter-container">
-            <span class="RefSelectorV1-module__RefSelectorInput__xaRA4 TextInput-wrapper prc-components-TextInputWrapper-Hpdqi prc-components-TextInputBaseWrapper-wY-n0 selector-input-wrap" data-component="TextInput" data-leading-visual="true" aria-busy="false">
-              <span class="TextInput-icon" aria-hidden="true" data-component="TextInput.LeadingVisual">${SEARCH_ICON}</span>
-              <input aria-label="Filter branches" placeholder="Find a branch..." data-component="input" class="prc-components-Input-IwWrt selector-filter" data-filter-target="refs" type="text" value="">
-            </span>
-          </div>
-        </div>
-        <div class="px-2 pb-2">
-          <div class="RefSelector-module__RefSelectorTabs__j_8pE RefSelectorV1-module__RefTypeTabs__TQteC selector-tabs">
-            <nav aria-label="Ref type" class="prc-TabNav-TabNavNav-MHmhC">
-              <div role="tablist" class="prc-TabNav-TabNavTabList-Ave63 selector-tab-list">
-                <button data-component="Button" type="button" role="tab" tabindex="${activeTab === 'branches' ? '0' : '-1'}" aria-selected="${activeTab === 'branches' ? 'true' : 'false'}" aria-controls="branches" class="prc-Button-ButtonBase-9n-Xk TabNav-item prc-TabNav-TabNavLink-u3umI ${activeTab === 'branches' ? 'selected prc-TabNav-Selected-LYsaH' : ''} RefSelector-module__RefSelectorTabLink__NbcT1 selector-tab" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="default" id="branch-button" data-ref-tab-target="branches">
-                  <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5"><span data-component="text" class="prc-Button-Label-FWkx3">Branches</span></span>
-                </button>
-                <button data-component="Button" type="button" role="tab" tabindex="${activeTab === 'tags' ? '0' : '-1'}" aria-selected="${activeTab === 'tags' ? 'true' : 'false'}" aria-controls="tags" class="prc-Button-ButtonBase-9n-Xk TabNav-item prc-TabNav-TabNavLink-u3umI ${activeTab === 'tags' ? 'selected prc-TabNav-Selected-LYsaH' : ''} RefSelector-module__RefSelectorTabLink__NbcT1 selector-tab" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="default" id="tag-button" data-ref-tab-target="tags">
-                  <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5"><span data-component="text" class="prc-Button-Label-FWkx3">Tags</span></span>
-                </button>
-              </div>
-            </nav>
-          </div>
-        </div>
-        <div id="branches" role="tabpanel" aria-labelledby="branch-button" class="RefsList-module__FixedSizeVirtualList__YEA5B selector-list selector-panel" ${activeTab === 'branches' ? '' : 'hidden'}>
-          <ul class="prc-ActionList-ActionList-rPFF2" role="menu" data-component="ActionList" data-dividers="false" data-variant="inset" data-filter-list="refs">
-            ${branchItems || '<li class="selector-empty">No branches found</li>'}
-          </ul>
-        </div>
-        <div id="tags" role="tabpanel" aria-labelledby="tag-button" class="RefsList-module__FixedSizeVirtualList__YEA5B selector-list selector-panel" ${activeTab === 'tags' ? '' : 'hidden'}>
-          <ul class="prc-ActionList-ActionList-rPFF2" role="menu" data-component="ActionList" data-dividers="false" data-variant="inset" data-filter-list="refs">
-            ${tagItems || '<li class="selector-empty">No tags found</li>'}
-          </ul>
-        </div>
-        <ul class="prc-ActionList-ActionList-rPFF2 p-0 selector-footer-list" data-component="ActionList" data-dividers="false" data-variant="inset">
-          <li class="d-block mt-0 RefSelectorV1-module__Divider__Zk_Bk prc-ActionList-Divider-taVfb" aria-hidden="true" data-component="ActionList.Divider"></li>
-          <li data-component="ActionList.Item" data-has-description="false" class="prc-ActionList-ActionListItem-So4vC RefSelectorV1-module__ViewAllRefsActionLink__Z80Vu">
-            <a class="prc-ActionList-ActionListContent-KBb8- prc-Link-Link-9ZwDx selector-footer" data-component="Link" tabindex="0" role="link" data-size="medium" href="/${escapeAttr(owner)}/${escapeAttr(repo)}/branches" data-ref-footer="branches" ${activeTab === 'branches' ? '' : 'hidden'}><span class="prc-ActionList-Spacer-4tR2m"></span><span class="prc-ActionList-ActionListSubContent-gKsFp"><span class="prc-ActionList-ItemLabel-81ohH"><span class="RefSelectorV1-module__ViewAllRefsActionText__HfC03">View all branches</span></span></span></a>
-            <a class="prc-ActionList-ActionListContent-KBb8- prc-Link-Link-9ZwDx selector-footer" data-component="Link" tabindex="0" role="link" data-size="medium" href="/${escapeAttr(owner)}/${escapeAttr(repo)}/tags" data-ref-footer="tags" ${activeTab === 'tags' ? '' : 'hidden'}><span class="prc-ActionList-Spacer-4tR2m"></span><span class="prc-ActionList-ActionListSubContent-gKsFp"><span class="prc-ActionList-ItemLabel-81ohH"><span class="RefSelectorV1-module__ViewAllRefsActionText__HfC03">View all tags</span></span></span></a>
-          </li>
+    <div class="filter-menu" role="dialog" aria-label="Switch branches or tags">
+      <div class="filter-menu-header">
+        <h2>Switch branches/tags</h2>
+        <button type="button" class="filter-close" aria-label="Close branch selector" data-close-filter>&times;</button>
+      </div>
+      <label class="filter-search">
+        <span class="sr-only">Filter branches or tags</span>
+        <input aria-label="Filter branches or tags" placeholder="${activeTab === 'tags' ? 'Find a tag...' : 'Find a branch...'}" class="filter-input" data-filter-target="refs" type="text" value="">
+      </label>
+      <div class="segmented" role="tablist" aria-label="Ref type">
+        <button type="button" role="tab" tabindex="${activeTab === 'branches' ? '0' : '-1'}" aria-selected="${activeTab === 'branches' ? 'true' : 'false'}" aria-controls="branches" class="segment-tab ${activeTab === 'branches' ? 'active' : ''}" id="branch-button" data-ref-tab-target="branches">Branches</button>
+        <button type="button" role="tab" tabindex="${activeTab === 'tags' ? '0' : '-1'}" aria-selected="${activeTab === 'tags' ? 'true' : 'false'}" aria-controls="tags" class="segment-tab ${activeTab === 'tags' ? 'active' : ''}" id="tag-button" data-ref-tab-target="tags">Tags</button>
+      </div>
+      <div id="branches" role="tabpanel" aria-labelledby="branch-button" class="filter-panel option-scroll" ${activeTab === 'branches' ? '' : 'hidden'}>
+        <ul class="option-list" role="menu" data-filter-list="refs">
+          ${branchItems || '<li class="filter-empty">No branches found</li>'}
         </ul>
+      </div>
+      <div id="tags" role="tabpanel" aria-labelledby="tag-button" class="filter-panel option-scroll" ${activeTab === 'tags' ? '' : 'hidden'}>
+        <ul class="option-list" role="menu" data-filter-list="refs">
+          ${tagItems || '<li class="filter-empty">No tags found</li>'}
+        </ul>
+      </div>
+      <div class="filter-menu-footer">
+        <a class="filter-footer-link" href="/${escapeAttr(owner)}/${escapeAttr(repo)}/branches" data-ref-footer="branches" ${activeTab === 'branches' ? '' : 'hidden'}>View all branches</a>
+        <a class="filter-footer-link" href="/${escapeAttr(owner)}/${escapeAttr(repo)}/tags" data-ref-footer="tags" ${activeTab === 'tags' ? '' : 'hidden'}>View all tags</a>
       </div>
     </div>
   </details>`;
@@ -2351,66 +2313,58 @@ function buildRefSelectorHtml({ owner, repo, ref, requestInfo, branches, tags, d
 
 function buildUserMenuItemHtml({ login, avatar, href, selected }) {
   return `<li role="none" class="user-menu-row" data-filter-value="${escapeAttr(String(login).toLowerCase())}">
-    <a role="menuitemradio" aria-checked="${selected ? 'true' : 'false'}" class="prc-ActionList-ActionListContent-KBb8- user-menu-item" data-size="medium" href="${escapeAttr(href)}">
-      <span class="prc-ActionList-LeadingAction-hbWbh prc-ActionList-VisualWrap-bdCsS checkmark" data-component="ActionList.Selection" aria-hidden="true">${selected ? CHECK_ICON : ''}</span>
-      <span class="prc-ActionList-LeadingVisual-NBr28 prc-ActionList-VisualWrap-bdCsS user-leading-visual" data-component="ActionList.LeadingVisual">
-        ${avatar ? `<img data-component="Avatar" class="prc-Avatar-Avatar-0xaUi avatar" alt="" width="20" height="20" data-testid="github-avatar" src="${escapeAttr(avatar)}">` : '<span class="avatar avatar-fallback"></span>'}
+    <a role="menuitemradio" aria-checked="${selected ? 'true' : 'false'}" class="filter-option user-menu-item ${selected ? 'active' : ''}" href="${escapeAttr(href)}">
+      <span class="option-check" aria-hidden="true">${selected ? '&#10003;' : ''}</span>
+      <span class="user-leading-visual" aria-hidden="true">
+        ${avatar ? `<img class="avatar" alt="" width="20" height="20" src="${escapeAttr(avatar)}">` : '<span class="avatar avatar-fallback"></span>'}
       </span>
-      <span class="prc-ActionList-ActionListSubContent-gKsFp user-menu-subcontent">
-        <span class="prc-ActionList-ItemLabel-81ohH user-login">${escapeHtml(login)}</span>
-      </span>
+      <span class="option-label user-login">${escapeHtml(login)}</span>
     </a>
   </li>`;
 }
 
-function buildUserSelectorItemsHtml({ owner, repo, ref, requestInfo, users }) {
+function buildUserFilterItemsHtml({ owner, repo, ref, requestInfo, users }) {
   const currentAuthor = requestInfo.author;
-  return users.map(user => buildUserMenuItemHtml({
+  const allUsersItem = buildUserMenuItemHtml({
+    login: 'All users',
+    avatar: '',
+    href: buildAuthorFilterHref(owner, repo, ref, requestInfo, ''),
+    selected: !currentAuthor,
+  });
+  const userItems = users.map(user => buildUserMenuItemHtml({
     login: user.login,
     avatar: rewriteOriginalUrlToProxy(user.avatar_url || ''),
     href: buildAuthorFilterHref(owner, repo, ref, requestInfo, user.login),
     selected: user.login === currentAuthor,
   })).join('');
+  return `${allUsersItem}${userItems}`;
 }
 
-function buildUserSelectorHtml({ owner, repo, ref, requestInfo, users }) {
+function buildUserFilterHtml({ owner, repo, ref, requestInfo, users }) {
   const currentAuthor = requestInfo.author;
-  const userItems = buildUserSelectorItemsHtml({ owner, repo, ref, requestInfo, users });
+  const userItems = buildUserFilterItemsHtml({ owner, repo, ref, requestInfo, users });
   const usersDataHref = buildCommitUsersDataHref(owner, repo, ref, requestInfo);
 
-  return `<details class="filter-popover user-selector" data-users-url="${escapeAttr(usersDataHref)}" data-users-loaded="false">
-    <summary data-component="Button" role="button" data-testid="user-selector-button" aria-haspopup="true" aria-expanded="false" tabindex="0" class="prc-Button-ButtonBase-9n-Xk btn selector-button" data-loading="false" data-size="medium" data-variant="default" id="user-selector-commits">
-      <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5 button-content">
-        <span data-component="text" class="prc-Button-Label-FWkx3 button-label">
-          <span class="d-flex">
-            <span class="mr-2" aria-hidden="true">${PEOPLE_ICON}</span>
-            <span class="UserSelector-module__truncatedUserText__EmYes user-selector-truncated-text"><span>${escapeHtml(currentAuthor || 'All users')}</span></span>
-          </span>
-        </span>
-        <span data-component="trailingAction" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-trailing" aria-hidden="true">${TRIANGLE_DOWN_ICON}</span>
-      </span>
+  return `<details class="filter-dropdown user-filter" data-users-url="${escapeAttr(usersDataHref)}" data-users-loaded="false">
+    <summary class="filter-button" role="button" aria-haspopup="true" aria-expanded="false" id="user-filter-commits">
+      <span class="filter-button-label">User</span>
+      <span class="filter-button-value">${escapeHtml(currentAuthor || 'All users')}</span>
     </summary>
-    <div role="dialog" data-component="AnchoredOverlay" data-anchor-position="false" data-width-medium="" data-height-auto="" data-side="outside-bottom" data-visibility-visible="" class="prc-Overlay-Overlay-jfs-T selector-overlay user-selector-overlay" aria-label="Select a user">
-      <div class="prc-ActionMenu-ActionMenuContainer-Om1Qz" data-variant="anchored">
-        <div class="p-2 border-bottom border-color-border-default selector-filter-container">
-          <span class="UserSelector-module__userSearchInput__pqcv4 TextInput-wrapper prc-components-TextInputWrapper-Hpdqi prc-components-TextInputBaseWrapper-wY-n0 selector-input-wrap" data-component="TextInput" data-leading-visual="true" aria-busy="false">
-            <span class="TextInput-icon" aria-hidden="true" data-component="TextInput.LeadingVisual">${SEARCH_ICON}</span>
-            <input placeholder="Find a user..." data-component="input" class="prc-components-Input-IwWrt selector-filter" data-filter-target="users" type="text" value="">
-          </span>
-        </div>
-        <div class="UsersList-module__scrollableUserList__MXL4H UserSelector-module__userListWithFooter__Gmfdb selector-list">
-          <ul class="prc-ActionList-ActionList-rPFF2" role="menu" aria-labelledby="user-selector-commits" data-component="ActionList" data-dividers="false" data-variant="inset" data-filter-list="users">
-            ${userItems}
-          </ul>
-          <div class="selector-empty user-selector-loading" hidden>Loading users...</div>
-          <div class="selector-empty user-selector-empty" hidden>No users found.</div>
-          <div class="selector-empty user-selector-error" hidden>Unable to load users.</div>
-        </div>
-        <div class="px-2 tmp-py-3 border-top border-color-border-default selector-user-footer">
-          <a data-component="Button" role="button" href="${escapeAttr(buildAuthorFilterHref(owner, repo, ref, requestInfo, ''))}" class="prc-Button-ButtonBase-9n-Xk selector-footer" data-block="block" data-loading="false" data-no-visuals="true" data-size="medium" data-variant="link" aria-keyshortcuts="v" tabindex="-1">
-            <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5"><span data-component="text" class="prc-Button-Label-FWkx3">View commits for all users</span></span>
-          </a>
-        </div>
+    <div class="filter-menu" role="dialog" aria-label="Select a user">
+      <div class="filter-menu-header">
+        <h2>Select a user</h2>
+        <button type="button" class="filter-close" aria-label="Close user selector" data-close-filter>&times;</button>
+      </div>
+      <label class="filter-search">
+        <span class="sr-only">Filter users</span>
+        <input aria-label="Filter users" placeholder="Find a user..." class="filter-input" data-filter-target="users" type="text" value="">
+      </label>
+      <div class="option-scroll">
+        <ul class="option-list" role="menu" aria-labelledby="user-filter-commits" data-filter-list="users">
+          ${userItems}
+        </ul>
+        <div class="filter-empty user-filter-loading" hidden>Loading users...</div>
+        <div class="filter-empty user-filter-error" hidden>Unable to load users.</div>
       </div>
     </div>
   </details>`;
@@ -2426,35 +2380,32 @@ function buildDatePickerHtml({ owner, repo, ref, requestInfo }) {
     path: requestInfo.path,
   })}`;
 
-  return `<details class="filter-popover date-selector">
-    <summary data-component="Button" role="button" aria-haspopup="true" aria-expanded="false" tabindex="0" data-testid="date-picker-commits" class="prc-Button-ButtonBase-9n-Xk btn selector-button" data-loading="false" data-size="medium" data-variant="default">
-      <span data-component="buttonContent" data-align="center" class="prc-Button-ButtonContent-Iohp5 button-content">
-        <span data-component="leadingVisual" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-leading" aria-hidden="true">${CALENDAR_ICON}</span>
-        <span data-component="text" class="prc-Button-Label-FWkx3 button-label">${escapeHtml(label)}</span>
-        <span data-component="trailingVisual" class="prc-Button-Visual-YNt2F prc-Button-VisualWrap-E4cnq button-trailing" aria-hidden="true">${TRIANGLE_DOWN_ICON}</span>
-      </span>
+  return `<details class="filter-dropdown date-filter">
+    <summary class="filter-button" role="button" aria-haspopup="true" aria-expanded="false">
+      <span class="filter-button-label">Date</span>
+      <span class="filter-button-value">${escapeHtml(label)}</span>
     </summary>
-    <div role="dialog" data-component="AnchoredOverlay" aria-label="Date Picker" aria-modal="true" data-anchor-position="false" data-width-auto="" data-height-auto="" data-side="outside-bottom" data-visibility-visible="" class="Overlay-module__overlay__jq7s5 prc-Overlay-Overlay-jfs-T selector-overlay date-overlay">
-      <form class="Panel-module__container__tJ7zS date-path-filter date-panel" method="get" action="${escapeAttr(basePath)}">
-        <header class="Panel-module__topNav__Xrczs date-panel-header">
-          <span class="Panel-module__pickers__NDS79 date-panel-title">Date range</span>
-          <button data-component="IconButton" type="button" class="prc-Button-ButtonBase-9n-Xk prc-Button-IconButton-fyge7 selector-close" data-loading="false" data-no-visuals="true" data-size="small" data-variant="invisible" aria-label="Close date picker" data-close-selector>${X_ICON}</button>
-        </header>
+    <div class="filter-menu date-menu" role="dialog" aria-label="Date range">
+      <form class="date-path-filter" method="get" action="${escapeAttr(basePath)}">
+        <div class="filter-menu-header">
+          <h2>Date range</h2>
+          <button type="button" class="filter-close" aria-label="Close date picker" data-close-filter>&times;</button>
+        </div>
         ${requestInfo.author ? `<input type="hidden" name="author" value="${escapeAttr(requestInfo.author)}"/>` : ''}
         ${requestInfo.path ? `<input type="hidden" name="path" value="${escapeAttr(requestInfo.path)}"/>` : ''}
-        <div class="date-panel-fields">
-          <div class="field">
-            <label for="since-input">Since</label>
+        <div class="date-fields">
+          <label class="date-field" for="since-input">
+            <span>Since</span>
             <input id="since-input" name="since" type="date" value="${escapeAttr(requestInfo.since.slice(0, 10))}"/>
-          </div>
-          <div class="field">
-            <label for="until-input">Until</label>
+          </label>
+          <label class="date-field" for="until-input">
+            <span>Until</span>
             <input id="until-input" name="until" type="date" value="${escapeAttr(requestInfo.until.slice(0, 10))}"/>
-          </div>
+          </label>
         </div>
-        <footer class="Panel-module__footer__zBnyZ date-panel-footer">
-          <a class="prc-Button-ButtonBase-9n-Xk link-btn" data-size="small" data-variant="invisible" href="${escapeAttr(clearDateHref)}">Clear</a>
-          <button class="prc-Button-ButtonBase-9n-Xk btn" data-size="small" data-variant="default" type="submit">Apply</button>
+        <footer class="filter-menu-footer actions">
+          <a class="link-btn" href="${escapeAttr(clearDateHref)}">Clear</a>
+          <button class="btn" type="submit">Apply</button>
         </footer>
       </form>
     </div>
@@ -2462,13 +2413,13 @@ function buildDatePickerHtml({ owner, repo, ref, requestInfo }) {
 }
 
 function buildCommitsFiltersHtml({ owner, repo, ref, requestInfo, branches, tags, users, defaultBranch }) {
-  return `<div class="tmp-mb-3 filters prc-Stack-Stack-UQ9k6" data-gap="condensed" data-direction="horizontal" data-align="stretch" data-wrap="nowrap" data-justify="space-between" data-padding="none">
-    <h2 class="sr-only prc-Heading-Heading-MtWFE" data-component="Heading">Branch selector</h2>
-    ${buildRefSelectorHtml({ owner, repo, ref, requestInfo, branches, tags, defaultBranch })}
-    <div class="selector-actions-group d-flex flex-column flex-sm-row gap-2">
-      <h2 class="sr-only prc-Heading-Heading-MtWFE" data-component="Heading">User selector</h2>
-      <div>${buildUserSelectorHtml({ owner, repo, ref, requestInfo, users })}</div>
-      <h2 class="sr-only prc-Heading-Heading-MtWFE" data-component="Heading">Datepicker</h2>
+  return `<div class="filters">
+    <h2 class="sr-only">Branch selector</h2>
+    ${buildRefFilterHtml({ owner, repo, ref, requestInfo, branches, tags, defaultBranch })}
+    <div class="filter-actions">
+      <h2 class="sr-only">User selector</h2>
+      ${buildUserFilterHtml({ owner, repo, ref, requestInfo, users })}
+      <h2 class="sr-only">Datepicker</h2>
       ${buildDatePickerHtml({ owner, repo, ref, requestInfo })}
     </div>
   </div>`;
@@ -2608,10 +2559,16 @@ h1 {
 }
 .filters {
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 22px;
+}
+.filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .sr-only {
   position: absolute;
@@ -2625,220 +2582,178 @@ h1 {
   border: 0;
 }
 [hidden] { display: none !important; }
-.filter-popover {
+.filter-dropdown {
   position: relative;
   display: inline-flex;
+  max-width: 100%;
 }
-.filter-popover > summary {
+.filter-dropdown > summary {
   list-style: none;
 }
-.filter-popover > summary::-webkit-details-marker {
+.filter-dropdown > summary::-webkit-details-marker {
   display: none;
 }
-.selector-button {
-  gap: 8px;
-  min-width: 0;
-  max-width: 100%;
-  user-select: none;
-}
-.button-content,
-.ref-selector-overlay-container,
-.d-flex {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
-.button-content {
-  gap: 8px;
-}
-.button-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.button-leading,
-.button-trailing,
-.ref-selector-overlay-header,
-.mr-2 {
-  color: var(--muted);
+.filter-button {
   display: inline-flex;
   align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 34px;
+  max-width: 260px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+  user-select: none;
+}
+.filter-button::after {
+  content: "";
+  width: 0;
+  height: 0;
+  margin-left: auto;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  color: var(--muted);
   flex: 0 0 auto;
 }
-.mr-2 {
-  margin-right: 8px;
+.filter-button-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
 }
-.ref-selector-button-text-container,
-.user-selector-truncated-text {
+.filter-button-value {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ref-selector-text {
-  display: inline-block;
-}
-.selector-overlay {
+.filter-menu {
   position: absolute;
   z-index: 20;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   left: 0;
-  width: min(320px, calc(100vw - 32px));
-  max-height: 520px;
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 32px));
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
   box-shadow: 0 16px 32px rgba(31, 35, 40, .15);
 }
-.selector-overlay-content,
-.prc-ActionMenu-ActionMenuContainer-Om1Qz {
-  display: flex;
-  flex-direction: column;
-  max-height: inherit;
-  min-height: 0;
-}
-.user-selector-overlay .prc-ActionMenu-ActionMenuContainer-Om1Qz {
-  height: 100%;
-}
-.user-selector .selector-overlay {
+.user-filter .filter-menu,
+.date-filter .filter-menu {
   right: 0;
   left: auto;
-  width: min(320px, calc(100vw - 32px));
-  max-height: min(520px, calc(100vh - 32px));
 }
-.date-selector .selector-overlay {
-  right: 0;
-  left: auto;
+.date-filter .filter-menu {
   width: min(300px, calc(100vw - 32px));
 }
-.selector-actions-group {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.selector-actions-group > div {
-  display: flex;
-}
-.selector-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
-.selector-heading {
+.filter-menu-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
 }
-.selector-heading h2 {
+.filter-menu-header h2 {
   margin: 0;
   font-size: 14px;
+  font-weight: 600;
 }
-.selector-close {
+.filter-close {
   width: 28px;
   height: 28px;
   padding: 0;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--muted);
+  cursor: pointer;
+  font: 20px/1 Arial, sans-serif;
 }
-.selector-filter-container {
+.filter-close:hover {
+  background: var(--subtle);
+  color: var(--fg);
+}
+.filter-search {
+  display: block;
   padding: 8px;
   border-bottom: 1px solid var(--border);
 }
-.selector-input-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.filter-input {
   width: 100%;
   height: 32px;
   padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  color: var(--muted);
-}
-.TextInput-icon {
-  display: inline-flex;
-  flex: 0 0 auto;
-}
-.selector-filter {
-  min-width: 0;
-  width: 100%;
-  height: 30px;
-  padding: 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
+  background: var(--bg);
   color: var(--fg);
   font: inherit;
 }
-.selector-tabs {
-  padding: 0 8px;
-  color: var(--muted);
-}
-.selector-tab-list {
+.segmented {
   display: flex;
-  align-items: flex-end;
+  padding: 8px 8px 0;
   border-bottom: 1px solid var(--border);
 }
-.selector-tab {
-  height: 38px;
-  padding: 0 8px;
+.segment-tab {
+  height: 34px;
+  padding: 0 10px;
   border: 0;
   border-bottom: 2px solid transparent;
-  border-radius: 0;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
   font: inherit;
 }
-.selector-tab.selected {
+.segment-tab.active {
   color: var(--fg);
   border-bottom-color: #fd8c73;
   font-weight: 600;
 }
-.selector-list {
+.filter-panel,
+.option-scroll {
   max-height: 330px;
   overflow-y: auto;
   min-height: 0;
 }
-.user-selector-overlay .selector-list {
-  flex: 1 1 auto;
+.user-filter .option-scroll {
   max-height: min(360px, calc(100vh - 180px));
 }
-.selector-list ul {
+.option-list {
   margin: 0;
   padding: 6px;
   list-style: none;
 }
+.option-row,
 .user-menu-row {
   display: block;
 }
-.ref-menu-item,
-.user-menu-item {
+.filter-option {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
   min-width: 0;
   min-height: 32px;
   padding: 6px 8px;
   border-radius: 6px;
   color: var(--fg);
 }
-.ref-menu-item:hover,
-.user-menu-item:hover {
+.filter-option:hover,
+.filter-option.active {
   background: var(--subtle);
   text-decoration: none;
 }
-.checkmark {
+.option-check {
   width: 18px;
   flex: 0 0 18px;
   color: var(--success);
+  text-align: center;
 }
 .user-leading-visual {
   display: inline-flex;
@@ -2853,32 +2768,15 @@ h1 {
   width: 20px;
   height: 20px;
 }
-.user-menu-subcontent {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-}
+.option-label,
 .user-login {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ref-menu-subcontent {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   min-width: 0;
   flex: 1 1 auto;
-}
-.ref-name {
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ref-label {
+.option-badge {
   margin-left: auto;
   padding: 0 6px;
   border: 1px solid var(--border);
@@ -2887,28 +2785,26 @@ h1 {
   font-size: 11px;
   line-height: 18px;
 }
-.selector-empty {
+.filter-empty {
   padding: 12px;
   color: var(--muted);
 }
-.selector-footer-list {
-  margin: 0;
-  padding: 0;
-  border-top: 1px solid var(--border);
-  list-style: none;
-}
-.selector-footer {
+.filter-menu-footer {
   display: flex;
   align-items: center;
-  min-height: 38px;
-  padding: 8px 12px;
-  color: var(--fg);
-}
-.selector-user-footer {
-  padding: 8px;
-}
-.selector-user-footer .selector-footer {
   justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+.filter-menu-footer.actions {
+  justify-content: flex-end;
+}
+.filter-footer-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
   width: 100%;
   color: var(--accent);
 }
@@ -2916,40 +2812,21 @@ h1 {
   display: block;
   padding: 0;
 }
-.date-panel-header,
-.date-panel-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px;
-}
-.date-panel-header {
-  border-bottom: 1px solid var(--border);
-}
-.date-panel-title {
-  color: var(--fg);
-  font-weight: 600;
-}
-.date-panel-fields {
+.date-fields {
   display: grid;
   gap: 10px;
   padding: 12px;
 }
-.date-panel-footer {
-  border-top: 1px solid var(--border);
-  justify-content: flex-end;
-}
-.field {
+.date-field {
   display: grid;
   gap: 4px;
 }
-.field label {
+.date-field span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
 }
-.field input {
+.date-field input {
   min-width: 150px;
   height: 34px;
   padding: 0 10px;
@@ -2959,19 +2836,6 @@ h1 {
   color: var(--fg);
   font: inherit;
 }
-.field.ref input { min-width: 190px; }
-.p-2 { padding: 8px; }
-.px-2 {
-  padding-left: 8px;
-  padding-right: 8px;
-}
-.pb-2 { padding-bottom: 8px; }
-.tmp-py-3 {
-  padding-top: 12px;
-  padding-bottom: 12px;
-}
-.border-bottom { border-bottom: 1px solid var(--border); }
-.border-top { border-top: 1px solid var(--border); }
 .btn, .link-btn {
   display: inline-flex;
   align-items: center;
@@ -2984,6 +2848,11 @@ h1 {
   color: var(--fg);
   font: inherit;
   cursor: pointer;
+}
+.link-btn {
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
 }
 .timeline {
   position: relative;
@@ -3132,12 +3001,12 @@ button.icon-btn { cursor: pointer; }
   .timeline { margin-left: 0; }
   .commit-row { display: block; }
   .commit-actions { margin-top: 10px; }
-  .field, .field input { width: 100%; }
+  .date-field, .date-field input { width: 100%; }
   .filters { flex-direction: column; }
-  .selector-actions-group { justify-content: flex-start; }
-  .selector-overlay,
-  .user-selector .selector-overlay,
-  .date-selector .selector-overlay {
+  .filter-actions { justify-content: flex-start; }
+  .filter-menu,
+  .user-filter .filter-menu,
+  .date-filter .filter-menu {
     left: 0;
     right: auto;
   }
@@ -3187,14 +3056,12 @@ function loadCommitUsers(details) {
   if (details.getAttribute('data-users-loading') === 'true') return;
   const url = details.getAttribute('data-users-url');
   const list = details.querySelector('[data-filter-list="users"]');
-  const loading = details.querySelector('.user-selector-loading');
-  const empty = details.querySelector('.user-selector-empty');
-  const error = details.querySelector('.user-selector-error');
+  const loading = details.querySelector('.user-filter-loading');
+  const error = details.querySelector('.user-filter-error');
   if (!url || !list) return;
 
   details.setAttribute('data-users-loading', 'true');
   if (loading) loading.hidden = false;
-  if (empty) empty.hidden = true;
   if (error) error.hidden = true;
 
   fetch(url, { headers: { accept: 'application/json' } }).then(function (response) {
@@ -3204,10 +3071,9 @@ function loadCommitUsers(details) {
   }).then(function (result) {
     if (!result.response.ok) throw new Error('Unable to load users');
     const data = result.data;
+    if (data && data.error) throw new Error(data.error);
     if (typeof data.itemsHtml === 'string' && data.itemsHtml) {
       list.innerHTML = data.itemsHtml;
-    } else if (empty) {
-      empty.hidden = false;
     }
     details.setAttribute('data-users-loaded', 'true');
     const input = details.querySelector('[data-filter-target="users"]');
@@ -3220,7 +3086,7 @@ function loadCommitUsers(details) {
   });
 }
 
-document.querySelectorAll('.filter-popover').forEach(function (details) {
+document.querySelectorAll('.filter-dropdown').forEach(function (details) {
   function syncExpanded() {
     const summary = details.querySelector('summary');
     if (summary) summary.setAttribute('aria-expanded', details.open ? 'true' : 'false');
@@ -3229,16 +3095,16 @@ document.querySelectorAll('.filter-popover').forEach(function (details) {
   details.addEventListener('toggle', function () {
     syncExpanded();
     if (!details.open) return;
-    document.querySelectorAll('.filter-popover[open]').forEach(function (other) {
+    document.querySelectorAll('.filter-dropdown[open]').forEach(function (other) {
       if (other !== details) other.open = false;
     });
-    if (details.classList.contains('user-selector')) loadCommitUsers(details);
+    if (details.classList.contains('user-filter')) loadCommitUsers(details);
   });
   syncExpanded();
 });
 
 document.addEventListener('input', function (event) {
-  const input = event.target.closest('.selector-filter');
+  const input = event.target.closest('.filter-input');
   if (!input) return;
   applySelectorFilter(input);
 });
@@ -3247,23 +3113,22 @@ document.addEventListener('click', function (event) {
   const tab = event.target.closest('[data-ref-tab-target]');
   if (tab) {
     event.preventDefault();
-    const overlay = tab.closest('.ref-selector-overlay');
+    const menu = tab.closest('.filter-menu');
     const target = tab.getAttribute('data-ref-tab-target');
-    if (overlay && target) {
-      overlay.querySelectorAll('[data-ref-tab-target]').forEach(function (item) {
+    if (menu && target) {
+      menu.querySelectorAll('[data-ref-tab-target]').forEach(function (item) {
         const active = item === tab;
-        item.classList.toggle('selected', active);
-        item.classList.toggle('prc-TabNav-Selected-LYsaH', active);
+        item.classList.toggle('active', active);
         item.setAttribute('aria-selected', active ? 'true' : 'false');
         item.setAttribute('tabindex', active ? '0' : '-1');
       });
-      overlay.querySelectorAll('.selector-panel').forEach(function (panel) {
+      menu.querySelectorAll('.filter-panel').forEach(function (panel) {
         panel.hidden = panel.id !== target;
       });
-      overlay.querySelectorAll('[data-ref-footer]').forEach(function (footer) {
+      menu.querySelectorAll('[data-ref-footer]').forEach(function (footer) {
         footer.hidden = footer.getAttribute('data-ref-footer') !== target;
       });
-      const input = overlay.querySelector('[data-filter-target="refs"]');
+      const input = menu.querySelector('[data-filter-target="refs"]');
       if (input) {
         input.placeholder = target === 'tags' ? 'Find a tag...' : 'Find a branch...';
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -3273,15 +3138,15 @@ document.addEventListener('click', function (event) {
     return;
   }
 
-  const closeButton = event.target.closest('[data-close-selector]');
+  const closeButton = event.target.closest('[data-close-filter]');
   if (closeButton) {
     event.preventDefault();
-    const details = closeButton.closest('.filter-popover');
+    const details = closeButton.closest('.filter-dropdown');
     if (details) details.open = false;
     return;
   }
 
-  document.querySelectorAll('.filter-popover[open]').forEach(function (details) {
+  document.querySelectorAll('.filter-dropdown[open]').forEach(function (details) {
     if (!details.contains(event.target)) details.open = false;
   });
 
@@ -3299,7 +3164,7 @@ document.addEventListener('click', function (event) {
 
 document.addEventListener('keydown', function (event) {
   if (event.key !== 'Escape') return;
-  document.querySelectorAll('.filter-popover[open]').forEach(function (details) {
+  document.querySelectorAll('.filter-dropdown[open]').forEach(function (details) {
     details.open = false;
   });
 });
