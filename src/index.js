@@ -2016,32 +2016,18 @@ async function handleCommitsRequest(requestInfo, origin, env) {
 }
 
 async function handleCommitUsersRequest(requestInfo, origin, env) {
-  const repoApiUrl = new URL(`https://api.github.com/repos/${encodeURIComponent(requestInfo.owner)}/${encodeURIComponent(requestInfo.repo)}`);
   const apiOptions = {
     userAgent: 'gh-proxy-commits-ui',
-    failureLabel: 'GitHub Commits API',
+    failureLabel: 'GitHub Contributors API',
   };
-  const repoResult = await fetchGitHubJson(repoApiUrl, env, apiOptions);
-  if (repoResult.ok && repoResult.data?.private) {
-    return jsonResponse({ error: 'Not found', itemsHtml: '' }, 404, origin);
-  }
-  if (!repoResult.ok) {
-    return jsonResponse({ error: repoResult.error || 'Unable to load repository.', itemsHtml: '' }, repoResult.status, origin);
-  }
 
-  const ref = requestInfo.ref || repoResult.data?.default_branch || '';
+  const ref = requestInfo.ref || '';
   const contributorUsersResult = await fetchRepoContributorUsers(requestInfo.owner, requestInfo.repo, env, apiOptions);
-  if (!contributorUsersResult.ok) {
-    return jsonResponse({
-      error: contributorUsersResult.error || 'Unable to load contributors.',
-      itemsHtml: '',
-    }, contributorUsersResult.status || 502, origin);
-  }
-
   const users = buildCommitUserOptions(requestInfo.author, contributorUsersResult.users || []);
   return jsonResponse({
     count: users.length,
     itemsHtml: buildUserSelectorItemsHtml({ owner: requestInfo.owner, repo: requestInfo.repo, ref, requestInfo, users }),
+    error: contributorUsersResult.ok ? null : contributorUsersResult.error,
   }, 200, origin);
 }
 
@@ -2377,27 +2363,14 @@ function buildUserMenuItemHtml({ login, avatar, href, selected }) {
   </li>`;
 }
 
-function buildAllUsersMenuItemHtml({ owner, repo, ref, requestInfo }) {
-  const currentAuthor = requestInfo.author;
-  return `<li role="none" class="user-menu-row" data-filter-value="all users">
-    <a role="menuitemradio" aria-checked="${currentAuthor ? 'false' : 'true'}" class="prc-ActionList-ActionListContent-KBb8- user-menu-item" data-size="medium" href="${escapeAttr(buildAuthorFilterHref(owner, repo, ref, requestInfo, ''))}">
-      <span class="prc-ActionList-LeadingAction-hbWbh prc-ActionList-VisualWrap-bdCsS checkmark" data-component="ActionList.Selection" aria-hidden="true">${currentAuthor ? '' : CHECK_ICON}</span>
-      <span class="prc-ActionList-LeadingVisual-NBr28 prc-ActionList-VisualWrap-bdCsS user-leading-visual" data-component="ActionList.LeadingVisual">${PEOPLE_ICON}</span>
-      <span class="prc-ActionList-ActionListSubContent-gKsFp user-menu-subcontent"><span class="prc-ActionList-ItemLabel-81ohH user-login">All users</span></span>
-    </a>
-  </li>`;
-}
-
 function buildUserSelectorItemsHtml({ owner, repo, ref, requestInfo, users }) {
   const currentAuthor = requestInfo.author;
-  const userItems = users.map(user => buildUserMenuItemHtml({
+  return users.map(user => buildUserMenuItemHtml({
     login: user.login,
     avatar: rewriteOriginalUrlToProxy(user.avatar_url || ''),
     href: buildAuthorFilterHref(owner, repo, ref, requestInfo, user.login),
     selected: user.login === currentAuthor,
   })).join('');
-
-  return `${buildAllUsersMenuItemHtml({ owner, repo, ref, requestInfo })}${userItems}`;
 }
 
 function buildUserSelectorHtml({ owner, repo, ref, requestInfo, users }) {
@@ -2430,6 +2403,7 @@ function buildUserSelectorHtml({ owner, repo, ref, requestInfo, users }) {
             ${userItems}
           </ul>
           <div class="selector-empty user-selector-loading" hidden>Loading users...</div>
+          <div class="selector-empty user-selector-empty" hidden>No users found.</div>
           <div class="selector-empty user-selector-error" hidden>Unable to load users.</div>
         </div>
         <div class="px-2 tmp-py-3 border-top border-color-border-default selector-user-footer">
@@ -3214,11 +3188,13 @@ function loadCommitUsers(details) {
   const url = details.getAttribute('data-users-url');
   const list = details.querySelector('[data-filter-list="users"]');
   const loading = details.querySelector('.user-selector-loading');
+  const empty = details.querySelector('.user-selector-empty');
   const error = details.querySelector('.user-selector-error');
   if (!url || !list) return;
 
   details.setAttribute('data-users-loading', 'true');
   if (loading) loading.hidden = false;
+  if (empty) empty.hidden = true;
   if (error) error.hidden = true;
 
   fetch(url, { headers: { accept: 'application/json' } }).then(function (response) {
@@ -3230,6 +3206,8 @@ function loadCommitUsers(details) {
     const data = result.data;
     if (typeof data.itemsHtml === 'string' && data.itemsHtml) {
       list.innerHTML = data.itemsHtml;
+    } else if (empty) {
+      empty.hidden = false;
     }
     details.setAttribute('data-users-loaded', 'true');
     const input = details.querySelector('[data-filter-target="users"]');
